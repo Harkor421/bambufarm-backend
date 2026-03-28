@@ -17,7 +17,7 @@ async function sendPush(expoPushToken, { title, body, data }) {
     mutableContent: true,
     _contentAvailable: true,
     priority: "high",
-    ...(data ? { data } : {}),
+    ...(data ? { data: { ...data, expoPushToken } } : {}),
   };
 
   try {
