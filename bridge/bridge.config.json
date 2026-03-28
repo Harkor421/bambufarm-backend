@@ -1,0 +1,48 @@
+{
+  "bambuTokens": {
+    "accessToken": "AACHccFJayN4Qsne26kvJy_V1KMdX_IN9ysmKJDj4CaO4lPL0c0z2VT_Od9hco8CkVLeCQ9HJQpjFmNdyYLQF2e7Xkpvf9GM7nA809JCmaZK2lCLuTQzhVVzrQmPiVgeqp7YgcqTAjf0NkmU",
+    "refreshToken": "AACHccFJayN4Qsne26kvJy_V1KMdX_IN9ysmKJDj4CaO4lPL0c0z2VT_Od9hco8CkVLeCQ9HJQpjFmNdyYLQF2e7Xkpvf9GM7nA809JCmaZK2lCLuTQzhVVzrQmPiVgeqp7YgcqTAjf0NkmU",
+    "expiresAt": 1781365406952
+  },
+  "printers": [
+    {
+      "devId": "01P00C511300712",
+      "name": "P1S-AMS-1",
+      "ip": "192.168.1.3",
+      "accessCode": "14336162"
+    },
+    {
+      "devId": "03919D571707148",
+      "name": "A1-AMS-1",
+      "ip": "192.168.1.6",
+      "accessCode": "13585194"
+    },
+    {
+      "devId": "01P09C4B1601273",
+      "name": "P1S-AMS-3",
+      "ip": "192.168.1.7",
+      "accessCode": "83987b84"
+    },
+    {
+      "devId": "01P09C4B1601189",
+      "name": "P1S-AMS-2",
+      "ip": "192.168.1.10",
+      "accessCode": "33939561"
+    },
+    {
+      "devId": "01P00C582701111",
+      "name": "P1S-2",
+      "ip": "192.168.1.11",
+      "accessCode": "14467041"
+    },
+    {
+      "devId": "01P00C582701216",
+      "name": "P1S-1",
+      "ip": "192.168.1.14",
+      "accessCode": "17079002"
+    }
+  ],
+  "serverUrl": "",
+  "bridgeToken": "",
+  "userId": ""
+}
