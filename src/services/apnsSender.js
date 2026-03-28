@@ -188,7 +188,7 @@ async function sendLiveActivityStart(pushToStartToken, attributes, contentState,
  * @param {string} activityUpdateToken - hex token from activity.pushTokenUpdates
  * @param {object} contentState - { jobTitle, progress, startTime, endTime, status }
  */
-async function sendLiveActivityUpdate(activityUpdateToken, contentState) {
+async function sendLiveActivityUpdate(activityUpdateToken, contentState, priority = 5) {
   if (!isConfigured()) return null;
 
   const payload = {
@@ -199,7 +199,7 @@ async function sendLiveActivityUpdate(activityUpdateToken, contentState) {
     },
   };
 
-  return sendAPNs(activityUpdateToken, payload, 10);
+  return sendAPNs(activityUpdateToken, payload, priority);
 }
 
 /**

@@ -191,11 +191,14 @@ class PrinterMqttConnection {
       }
     }
 
-    // Send LA progress update on pushall (msg=0) OR any mc_percent change for RUNNING printers
-    const isPushall = p.command === "push_status" && (p.msg === 0 || p.msg === "0");
+    // Send LA progress update — throttled to once per 60s per printer to stay within Apple's budget
     const pctChanged = p.mc_percent != null && p.mc_percent !== (prev.mc_percent ?? -1);
-    if (merged.gcode_state === "RUNNING" && (isPushall || pctChanged) && merged.mc_percent != null) {
-      if (true) {
+    if (merged.gcode_state === "RUNNING" && pctChanged && merged.mc_percent != null) {
+      const now = Date.now();
+      const lastUpdate = this._lastProgressUpdate?.get(devId) || 0;
+      if (now - lastUpdate >= 60000) {
+        if (!this._lastProgressUpdate) this._lastProgressUpdate = new Map();
+        this._lastProgressUpdate.set(devId, now);
         try {
           if (this.onProgressUpdate) await this.onProgressUpdate(devId, merged);
         } catch (err) { log.error(`[MQTT] onProgressUpdate error for ${devId}: ${err.message}`); }
@@ -434,7 +437,7 @@ class MqttPrinterService {
               const contentState = {
                 jobTitle: jTitle, progress,
                 startTime: nowSec,
-                endTime: remaining > 0 ? nowSec + remaining : nowSec + 3600,
+                endTime: remaining > 0 ? nowSec + remaining : nowSec,
                 status: "printing",
               };
 
@@ -657,7 +660,7 @@ class MqttPrinterService {
                 jobTitle: laTitle,
                 progress,
                 startTime: nowSec,
-                endTime: remaining > 0 ? nowSec + remaining : nowSec + 3600,
+                endTime: remaining > 0 ? nowSec + remaining : nowSec,
                 status,
               };
               const r = notification.data.type === "print_started"
