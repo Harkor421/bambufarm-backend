@@ -17,7 +17,7 @@ const User = require("../db/models/User");
 const PrinterState = require("../db/models/PrinterState");
 const { sendPush } = require("./pushSender");
 const apns = require("./apnsSender");
-const { getActivityToken, clearActivityToken, isTokenInvalid } = require("./apnsTokenUtils");
+const { getActivityToken, clearActivityToken, clearPushToStartToken, isTokenInvalid } = require("./apnsTokenUtils");
 const { ensureFreshToken } = require("./tokenRefresh");
 const { lookupHmsError, formatHmsCode } = require("../utils/hmsErrors");
 
@@ -196,7 +196,7 @@ class PrinterMqttConnection {
     if (merged.gcode_state === "RUNNING" && pctChanged && merged.mc_percent != null) {
       const now = Date.now();
       const lastUpdate = this._lastProgressUpdate?.get(devId) || 0;
-      if (now - lastUpdate >= 60000) {
+      if (now - lastUpdate >= 150000) {
         if (!this._lastProgressUpdate) this._lastProgressUpdate = new Map();
         this._lastProgressUpdate.set(devId, now);
         try {
@@ -426,7 +426,7 @@ class MqttPrinterService {
               }
             },
             onProgressUpdate: async (devId, state) => {
-              // Update LA via push-to-start token (no activity token needed)
+              // Update LA via activity update token (push-to-start only works for "start" event)
               const allUsers = await User.find({ bambu_uid: bambuUid, fail_count: { $lt: 5 } }).lean();
               const nowSec = Math.floor(Date.now() / 1000);
               const progress = (state.mc_percent || 0) / 100;
@@ -443,17 +443,17 @@ class MqttPrinterService {
 
               const sentTokens = new Set();
               for (const u of allUsers) {
-                const pts = u.la_push_to_start_token;
-                if (!pts || sentTokens.has(pts)) continue;
-                sentTokens.add(pts);
+                const actToken = getActivityToken(u, devId);
+                if (!actToken || sentTokens.has(actToken)) continue;
+                sentTokens.add(actToken);
                 try {
-                  const r = await apns.sendLiveActivityUpdate(pts, contentState);
+                  const r = await apns.sendLiveActivityUpdate(actToken, contentState);
                   if (r?.success) {
                     log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}%`);
                   } else {
                     log.warn(`[APNS] Progress failed ${pName} (${r?.status}): ${r?.reason?.reason}`);
                   }
-                  if (r?.status === 410) await clearPushToStartToken(u._id);
+                  if (isTokenInvalid(r)) await clearActivityToken(u._id, devId);
                 } catch (e) {
                   log.warn(`[APNS] Progress error ${pName}: ${e.message}`);
                 }
@@ -544,18 +544,17 @@ class MqttPrinterService {
               endTime: mcRemaining > 0 ? nowSec + mcRemaining : nowSec + 3600,
               status: "printing",
             };
-            // Use push-to-start token from ANY user record with same bambu_uid
+            // Use activity update token from ANY user record with same bambu_uid
             const allUsers = await User.find({ bambu_uid: user.bambu_uid || "none", fail_count: { $lt: 5 } }).lean();
-            const sentTokens = new Set();
             for (const u of allUsers) {
-              const pts = u.la_push_to_start_token;
-              if (!pts || sentTokens.has(pts)) continue;
-              sentTokens.add(pts);
-              const r = await apns.sendLiveActivityUpdate(pts, contentState);
+              const actToken = getActivityToken(u, devId);
+              if (!actToken) continue;
+              const r = await apns.sendLiveActivityUpdate(actToken, contentState);
               if (r?.success) {
                 log.info(`[MQTT] LA update sent for ${devId}`);
                 break;
               }
+              if (isTokenInvalid(r)) await clearActivityToken(u._id, devId);
             }
           }
           return;
@@ -626,48 +625,74 @@ class MqttPrinterService {
         await sendPush(user.expo_push_token, notification);
         let apnsSuccess = false;
 
-        // Send Live Activity update via push-to-start token (only reliable method)
-        if (apns.isConfigured() && user.la_push_to_start_token && !skipPushToStart) {
+        // Send Live Activity updates via APNS
+        // START uses push-to-start token; UPDATE/END use activity update token
+        if (apns.isConfigured()) {
           const nowSec = Math.floor(Date.now() / 1000);
           const remaining = (state.mc_remaining_time || 0) * 60;
           const rawProgress = (state.mc_percent || 0) / 100;
           const progress = (gcodeState === "PREPARE" || (gcodeState === "RUNNING" && effectivePrev === "PREPARE" && rawProgress >= 0.95)) ? 0 : rawProgress;
 
           try {
-            if (notification.data.type === "print_finished" || notification.data.type === "print_error") {
-              const isCancelled = notification.data.type === "print_error";
-              const r = await apns.sendLiveActivityEnd(user.la_push_to_start_token, {
-                jobTitle: isCancelled ? "Cancelled" : jobTitle,
-                progress: isCancelled ? progress : 1.0,
-                startTime: nowSec, endTime: nowSec,
-                status: isCancelled ? "cancelled" : "finished",
-              });
-              if (r?.success) apnsSuccess = true;
-              log.info(`[MQTT-LA] print_${isCancelled ? "cancelled" : "finished"} for ${devId}: ${r?.success ? "sent" : "failed"}`);
-            } else {
-              const status = gcodeState === "PAUSE" ? "paused" : "printing";
-              let laTitle = jobTitle;
-              if (gcodeState === "PAUSE") {
-                const hmsAlerts = Array.isArray(state.hms) ? state.hms : [];
-                if (hmsAlerts.length > 0) {
-                  const firstReason = lookupHmsError(hmsAlerts[0].attr, hmsAlerts[0].code);
-                  if (firstReason) laTitle = firstReason;
-                } else {
-                  laTitle = "Paused by user";
-                }
+            if (notification.data.type === "print_started") {
+              // START: use push-to-start token
+              if (user.la_push_to_start_token && !skipPushToStart) {
+                const contentState = {
+                  jobTitle, progress,
+                  startTime: nowSec,
+                  endTime: remaining > 0 ? nowSec + remaining : nowSec,
+                  status: "printing",
+                };
+                const r = await apns.sendLiveActivityStart(user.la_push_to_start_token, { printerId: devId, printerName }, contentState);
+                if (r?.success) apnsSuccess = true;
+                log.info(`[MQTT-LA] print_started for ${devId}: ${r?.success ? "sent" : "failed"}`);
               }
-              const contentState = {
-                jobTitle: laTitle,
-                progress,
-                startTime: nowSec,
-                endTime: remaining > 0 ? nowSec + remaining : nowSec,
-                status,
-              };
-              const r = notification.data.type === "print_started"
-                ? await apns.sendLiveActivityStart(user.la_push_to_start_token, { printerId: devId, printerName }, contentState)
-                : await apns.sendLiveActivityUpdate(user.la_push_to_start_token, contentState);
-              if (r?.success) apnsSuccess = true;
-              log.info(`[MQTT-LA] ${notification.data.type} for ${devId}: ${progress * 100 | 0}% (${remaining / 60 | 0}min) — ${r?.success ? "sent" : "failed"}`);
+            } else if (notification.data.type === "print_finished" || notification.data.type === "print_error") {
+              // END: use activity update token
+              const actToken = getActivityToken(user, devId);
+              if (actToken) {
+                const isCancelled = notification.data.type === "print_error";
+                const r = await apns.sendLiveActivityEnd(actToken, {
+                  jobTitle: isCancelled ? "Cancelled" : jobTitle,
+                  progress: isCancelled ? progress : 1.0,
+                  startTime: nowSec, endTime: nowSec,
+                  status: isCancelled ? "cancelled" : "finished",
+                });
+                if (r?.success) apnsSuccess = true;
+                if (isTokenInvalid(r)) await clearActivityToken(userId, devId);
+                await clearActivityToken(userId, devId); // clean up after end
+                log.info(`[MQTT-LA] print_${isCancelled ? "cancelled" : "finished"} for ${devId}: ${r?.success ? "sent" : "failed"}`);
+              } else {
+                log.warn(`[MQTT-LA] No activity token for ${devId}, cannot end LA`);
+              }
+            } else {
+              // UPDATE (pause, resume): use activity update token
+              const actToken = getActivityToken(user, devId);
+              if (actToken) {
+                const status = gcodeState === "PAUSE" ? "paused" : "printing";
+                let laTitle = jobTitle;
+                if (gcodeState === "PAUSE") {
+                  const hmsAlerts = Array.isArray(state.hms) ? state.hms : [];
+                  if (hmsAlerts.length > 0) {
+                    const firstReason = lookupHmsError(hmsAlerts[0].attr, hmsAlerts[0].code);
+                    if (firstReason) laTitle = firstReason;
+                  } else {
+                    laTitle = "Paused by user";
+                  }
+                }
+                const contentState = {
+                  jobTitle: laTitle, progress,
+                  startTime: nowSec,
+                  endTime: remaining > 0 ? nowSec + remaining : nowSec,
+                  status,
+                };
+                const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10);
+                if (r?.success) apnsSuccess = true;
+                if (isTokenInvalid(r)) await clearActivityToken(userId, devId);
+                log.info(`[MQTT-LA] ${notification.data.type} for ${devId}: ${progress * 100 | 0}% — ${r?.success ? "sent" : "failed"}`);
+              } else {
+                log.warn(`[MQTT-LA] No activity token for ${devId}, cannot update LA`);
+              }
             }
           } catch (e) {
             log.error(`[MQTT-LA] Error for ${devId}: ${e.message}`);

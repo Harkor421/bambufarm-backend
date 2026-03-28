@@ -189,4 +189,96 @@ router.post("/admin/broadcast", async (req, res) => {
   }
 });
 
+// GET /api/admin/stats — platform stats
+router.get("/admin/stats", async (req, res) => {
+  try {
+    const { password } = req.query;
+    if (password !== ADMIN_PASSWORD) {
+      return res.status(403).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const PrinterState = require("../db/models/PrinterState");
+    const wsManager = require("../services/wsManager");
+
+    // Total registered users
+    const totalUsers = await User.countDocuments();
+
+    // Unique Bambu accounts (by bambu_uid)
+    const uniqueAccounts = await User.distinct("bambu_uid", { bambu_uid: { $ne: null } });
+
+    // Users with push-to-start token (LA capable)
+    const laUsers = await User.countDocuments({ la_push_to_start_token: { $ne: null } });
+
+    // Users with activity tokens
+    const usersWithActivityTokens = await User.countDocuments({ "la_activity_tokens": { $exists: true, $ne: {} } });
+
+    // Printers per user
+    const printerCounts = await PrinterState.aggregate([
+      { $group: { _id: "$user_id", count: { $sum: 1 } } },
+      { $group: {
+        _id: null,
+        totalPrinters: { $sum: "$count" },
+        avgPerUser: { $avg: "$count" },
+        maxPerUser: { $max: "$count" },
+        minPerUser: { $min: "$count" },
+        userCount: { $sum: 1 },
+      }},
+    ]);
+
+    // Unique printers (by dev_id)
+    const uniquePrinters = await PrinterState.distinct("printer_dev_id");
+
+    // Currently printing
+    const printing = await PrinterState.countDocuments({ notif_status: "printing" });
+    const paused = await PrinterState.countDocuments({ notif_status: "paused" });
+
+    // Bridge connections — count unique bridge WebSocket clients
+    let bridgeCount = 0;
+    try {
+      if (wsManager.bridges) {
+        for (const [, userBridges] of wsManager.bridges) {
+          bridgeCount += userBridges.size || userBridges.length || 0;
+        }
+      }
+    } catch {}
+    const bridges = bridgeCount;
+
+    // Users by device count buckets
+    const deviceBuckets = await PrinterState.aggregate([
+      { $group: { _id: "$user_id", count: { $sum: 1 } } },
+      { $bucket: {
+        groupBy: "$count",
+        boundaries: [1, 2, 3, 5, 10, 20, 50],
+        default: "50+",
+        output: { users: { $sum: 1 } },
+      }},
+    ]);
+
+    const stats = printerCounts[0] || {};
+
+    res.json({
+      ok: true,
+      users: {
+        totalRegistered: totalUsers,
+        uniqueBambuAccounts: uniqueAccounts.length,
+        withLiveActivities: laUsers,
+        withActivityTokens: usersWithActivityTokens,
+      },
+      printers: {
+        uniqueDevices: uniquePrinters.length,
+        totalRecords: stats.totalPrinters || 0,
+        avgPerUser: Math.round((stats.avgPerUser || 0) * 10) / 10,
+        maxPerUser: stats.maxPerUser || 0,
+        currentlyPrinting: printing,
+        currentlyPaused: paused,
+      },
+      bridges: bridges,
+      printerDistribution: deviceBuckets,
+    });
+  } catch (err) {
+    log.error(`[ADMIN] Stats error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;

@@ -209,6 +209,12 @@ class WsManager {
               log.info(`[WS] Bridge connected for uid ${userId}`);
               this._sendDemandUpdate(ws, userId);
               this._notifyBridgeStatus(userId, true);
+
+              // Track bridge session in DB
+              const BridgeSession = require("../db/models/BridgeSession");
+              BridgeSession.create({ bambu_uid: userId, connected_at: new Date() })
+                .then((s) => { ws._bridgeSessionId = s._id; })
+                .catch(() => {});
             });
           } else {
             ws.close(4002, "Invalid auth");
@@ -227,6 +233,14 @@ class WsManager {
     ws.on("close", () => {
       clearTimeout(authTimeout);
       if (userId) {
+        // Close bridge session in DB
+        if (ws._bridgeSessionId) {
+          const BridgeSession = require("../db/models/BridgeSession");
+          BridgeSession.updateOne(
+            { _id: ws._bridgeSessionId },
+            { disconnected_at: new Date(), last_active_at: new Date() }
+          ).catch(() => {});
+        }
         this.bridgeMeta.delete(ws);
         const set = this.bridges.get(userId);
         if (set) { set.delete(ws); if (set.size === 0) this.bridges.delete(userId); }
