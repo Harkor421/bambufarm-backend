@@ -423,7 +423,7 @@ class MqttPrinterService {
               }
             },
             onProgressUpdate: async (devId, state) => {
-              // Send progress update to all users via push-to-start token
+              // Update LA progress via activity token (not push-to-start)
               const allUsers = await User.find({ bambu_uid: bambuUid, fail_count: { $lt: 5 } }).lean();
               const nowSec = Math.floor(Date.now() / 1000);
               const progress = (state.mc_percent || 0) / 100;
@@ -438,17 +438,17 @@ class MqttPrinterService {
                 status: "printing",
               };
 
-              const sentTokens = new Set();
               for (const u of allUsers) {
-                if (!u.la_push_to_start_token || sentTokens.has(u.la_push_to_start_token)) continue;
-                sentTokens.add(u.la_push_to_start_token);
+                const actToken = getActivityToken(u, devId);
+                if (!actToken) continue;
                 try {
-                  const r = await apns.sendLiveActivityUpdate(u.la_push_to_start_token, contentState);
+                  const r = await apns.sendLiveActivityUpdate(actToken, contentState);
                   if (r?.success) {
-                    log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}% (${Math.round(remaining / 60)}min)`);
+                    log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}%`);
                   }
+                  if (r?.status === 410) await clearActivityToken(u._id, devId);
                 } catch (e) {
-                  log.warn(`[APNS] Progress update failed for ${pName}: ${e.message}`);
+                  log.warn(`[APNS] Progress failed ${pName}: ${e.message}`);
                 }
               }
             },
