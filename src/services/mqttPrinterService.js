@@ -440,15 +440,20 @@ class MqttPrinterService {
 
               for (const u of allUsers) {
                 const actToken = getActivityToken(u, devId);
-                if (!actToken) continue;
+                if (!actToken) {
+                  log.warn(`[APNS] No activity token for ${devId}`);
+                  continue;
+                }
                 try {
                   const r = await apns.sendLiveActivityUpdate(actToken, contentState);
                   if (r?.success) {
-                    log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}%`);
+                    log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}% ✓`);
+                  } else {
+                    log.warn(`[APNS] Progress failed ${pName} (${r?.status}): ${r?.reason?.reason}`);
                   }
                   if (r?.status === 410) await clearActivityToken(u._id, devId);
                 } catch (e) {
-                  log.warn(`[APNS] Progress failed ${pName}: ${e.message}`);
+                  log.warn(`[APNS] Progress error ${pName}: ${e.message}`);
                 }
               }
             },
