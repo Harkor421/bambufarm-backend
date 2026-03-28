@@ -423,7 +423,7 @@ class MqttPrinterService {
               }
             },
             onProgressUpdate: async (devId, state) => {
-              // Update LA progress via activity token (not push-to-start)
+              // Update LA via push-to-start token (no activity token needed)
               const allUsers = await User.find({ bambu_uid: bambuUid, fail_count: { $lt: 5 } }).lean();
               const nowSec = Math.floor(Date.now() / 1000);
               const progress = (state.mc_percent || 0) / 100;
@@ -438,20 +438,19 @@ class MqttPrinterService {
                 status: "printing",
               };
 
+              const sentTokens = new Set();
               for (const u of allUsers) {
-                const actToken = getActivityToken(u, devId);
-                if (!actToken) {
-                  log.warn(`[APNS] No activity token for ${devId}`);
-                  continue;
-                }
+                const pts = u.la_push_to_start_token;
+                if (!pts || sentTokens.has(pts)) continue;
+                sentTokens.add(pts);
                 try {
-                  const r = await apns.sendLiveActivityUpdate(actToken, contentState);
+                  const r = await apns.sendLiveActivityUpdate(pts, contentState);
                   if (r?.success) {
-                    log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}% ✓`);
+                    log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}%`);
                   } else {
                     log.warn(`[APNS] Progress failed ${pName} (${r?.status}): ${r?.reason?.reason}`);
                   }
-                  if (r?.status === 410) await clearActivityToken(u._id, devId);
+                  if (r?.status === 410) await clearPushToStartToken(u._id);
                 } catch (e) {
                   log.warn(`[APNS] Progress error ${pName}: ${e.message}`);
                 }
@@ -542,15 +541,17 @@ class MqttPrinterService {
               endTime: mcRemaining > 0 ? nowSec + mcRemaining : nowSec + 3600,
               status: "printing",
             };
-            // Find activity token from ANY user record with same bambu_uid
+            // Use push-to-start token from ANY user record with same bambu_uid
             const allUsers = await User.find({ bambu_uid: user.bambu_uid || "none", fail_count: { $lt: 5 } }).lean();
+            const sentTokens = new Set();
             for (const u of allUsers) {
-              const tok = getActivityToken(u, devId);
-              if (tok) {
-                log.info(`[MQTT] Sending LA update for ${devId} via user ${u._id}`);
-                const r = await apns.sendLiveActivityUpdate(tok, contentState);
-                if (!isTokenInvalid(r)) break; // success, stop trying
-                await clearActivityToken(u._id, devId);
+              const pts = u.la_push_to_start_token;
+              if (!pts || sentTokens.has(pts)) continue;
+              sentTokens.add(pts);
+              const r = await apns.sendLiveActivityUpdate(pts, contentState);
+              if (r?.success) {
+                log.info(`[MQTT] LA update sent for ${devId}`);
+                break;
               }
             }
           }
