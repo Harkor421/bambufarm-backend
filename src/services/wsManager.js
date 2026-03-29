@@ -284,7 +284,7 @@ class WsManager {
         for (const publicWs of this.publicClients) {
           if (publicWs.readyState === 1) publicWs.send(msg);
         }
-        log.info(`[WS] New public camera ${printerId}, notified ${this.publicClients.size} public client(s)`);
+        log.debug(`[WS] New public camera ${printerId}, notified ${this.publicClients.size} public client(s)`);
       }
 
       // Relay binary frame to subscribed public clients
@@ -374,14 +374,14 @@ class WsManager {
         const meta = this.appMeta.get(ws);
         if (meta) {
           meta.subscribedPrinters.add(msg.printerId);
-          log.info(`[WS] App subscribed to camera ${msg.printerId}`);
+          log.debug(`[WS] App subscribed to camera ${msg.printerId}`);
           this._notifyBridgeDemand(userId);
         }
       } else if (msg.type === "unsubscribe_camera" && msg.printerId) {
         const meta = this.appMeta.get(ws);
         if (meta) {
           meta.subscribedPrinters.delete(msg.printerId);
-          log.info(`[WS] App unsubscribed from camera ${msg.printerId}`);
+          log.debug(`[WS] App unsubscribed from camera ${msg.printerId}`);
           this._notifyBridgeDemand(userId);
         }
       }
@@ -411,7 +411,7 @@ class WsManager {
     }
 
     this.publicClients.add(ws);
-    log.info("[WS] Public camera client connected");
+    log.debug("[WS] Public camera client connected");
 
     ws.on("message", (data) => {
       let msg;
@@ -425,7 +425,7 @@ class WsManager {
 
         const printers = this.getAvailableCameras(publicUid);
         ws.send(JSON.stringify({ type: "ready", printers }));
-        log.info(`[WS] Public client subscribed to ${msg.printers.length} cameras, ${printers.length} available`);
+        log.debug(`[WS] Public client subscribed to ${msg.printers.length} cameras, ${printers.length} available`);
       } else if (msg.type === "ping") {
         ws._isAlive = true;
       }
@@ -433,7 +433,7 @@ class WsManager {
 
     ws.on("close", () => {
       this.publicClients.delete(ws);
-      log.info("[WS] Public camera client disconnected");
+      log.debug("[WS] Public camera client disconnected");
       this._notifyBridgeDemand(publicUid);
     });
 
@@ -472,11 +472,11 @@ class WsManager {
     const demanded = this._getDemandedPrinters(userId);
     const bridges = this.bridges.get(userId);
     if (!bridges) {
-      log.info(`[WS] No bridges found for uid ${userId} — cannot send demand`);
+      log.debug(`[WS] No bridges found for uid ${userId} — cannot send demand`);
       return;
     }
     const printerList = Array.from(demanded);
-    log.info(`[WS] Sending demand_update to ${bridges.size} bridge(s): ${printerList.length} printer(s)`);
+    log.debug(`[WS] Sending demand_update to ${bridges.size} bridge(s): ${printerList.length} printer(s)`);
     const msg = JSON.stringify({ type: "demand_update", printers: printerList });
     for (const bridgeWs of bridges) {
       if (bridgeWs.readyState === 1) bridgeWs.send(msg);
@@ -503,7 +503,7 @@ class WsManager {
     for (const ws of clients) {
       try { ws.send(msg); } catch {}
     }
-    log.info(`[WS] Notified ${clients.size} app client(s) — bridge ${online ? "online" : "offline"} for uid ${userId}`);
+    log.debug(`[WS] Notified ${clients.size} app client(s) — bridge ${online ? "online" : "offline"} for uid ${userId}`);
   }
 
   close() {

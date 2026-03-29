@@ -334,9 +334,9 @@ class MqttPrinterService {
 
   async _connectAllUsers() {
     try {
-      log.info("[MQTT] Connecting all users...");
+      log.debug("[MQTT] Connecting all users...");
       const users = await User.find({ fail_count: { $lt: 5 } }).lean();
-      log.info(`[MQTT] ${users.length} users`);
+      log.debug(`[MQTT] ${users.length} users`);
 
       // Track connected Bambu UIDs to avoid duplicate MQTT connections.
       // Multiple DB user records can share the same Bambu account (e.g. dev + prod builds).
@@ -374,11 +374,11 @@ class MqttPrinterService {
             timeout: 10000,
           });
           const bambuUid = String(profile.data.uid);
-          log.info(`[MQTT] User ${id} uid=${bambuUid}`);
+          log.debug(`[MQTT] User ${id} uid=${bambuUid}`);
 
           // Skip if another user record with the same Bambu UID is already connected
           if (connectedBambuUids.has(bambuUid)) {
-            log.info(`[MQTT] User ${id} uid=${bambuUid} already connected via user ${connectedBambuUids.get(bambuUid)}, skipping duplicate`);
+            log.debug(`[MQTT] User ${id} uid=${bambuUid} already connected via user ${connectedBambuUids.get(bambuUid)}, skipping duplicate`);
             continue;
           }
           connectedBambuUids.set(bambuUid, id);
@@ -416,7 +416,7 @@ class MqttPrinterService {
                 expo_push_token: { $exists: true, $ne: null },
                 fail_count: { $lt: 5 },
               }).lean();
-              log.info(`[MQTT] Notifying ${allSameAccount.length} user(s) for uid ${bambuUid}`);
+              log.debug(`[MQTT] Notifying ${allSameAccount.length} user(s) for uid ${bambuUid}`);
               // Track which push-to-start tokens we've already sent to avoid duplicates
               const sentPushToStartTokens = new Set();
               for (const u of allSameAccount) {
@@ -532,7 +532,7 @@ class MqttPrinterService {
         if (gcodeState === "RUNNING") {
           // DB says printing, MQTT says RUNNING — printer was already running before deploy.
           // Send LA UPDATE to fix stale "preparing" state. Check ALL users for activity token.
-          log.info(`[MQTT] First connect ${devId}: already RUNNING, sending LA update to all users`);
+          log.debug(`[MQTT] First connect ${devId}: already RUNNING, sending LA update to all users`);
           if (apns.isConfigured()) {
             const nowSec = Math.floor(Date.now() / 1000);
             const mcProgress = (state.mc_percent || 0) / 100;
@@ -559,10 +559,10 @@ class MqttPrinterService {
           }
           return;
         }
-        log.info(`[MQTT] First connect ${devId}: DB already ${dbStatus}, skipping`);
+        log.debug(`[MQTT] First connect ${devId}: DB already ${dbStatus}, skipping`);
         return;
       }
-      log.info(`[MQTT] First connect ${devId}: DB was ${dbStatus} (${effectivePrev}), MQTT is ${gcodeState} — treating as transition`);
+      log.debug(`[MQTT] First connect ${devId}: DB was ${dbStatus} (${effectivePrev}), MQTT is ${gcodeState} — treating as transition`);
     }
 
     if (effectivePrev && gcodeState !== effectivePrev) {
