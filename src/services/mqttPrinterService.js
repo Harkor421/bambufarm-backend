@@ -442,6 +442,7 @@ class MqttPrinterService {
               };
 
               const sentTokens = new Set();
+              const sentPushTokens = new Set();
               for (const u of allUsers) {
                 const actToken = getActivityToken(u, devId);
                 if (!actToken || sentTokens.has(actToken)) continue;
@@ -456,6 +457,15 @@ class MqttPrinterService {
                   if (isTokenInvalid(r)) await clearActivityToken(u._id, devId);
                 } catch (e) {
                   log.warn(`[APNS] Progress error ${pName}: ${e.message}`);
+                }
+
+                // Send silent push to trigger NSE → refresh LA thumbnail image
+                if (u.expo_push_token && !sentPushTokens.has(u.expo_push_token)) {
+                  sentPushTokens.add(u.expo_push_token);
+                  sendPush(u.expo_push_token, {
+                    title: null, body: null,
+                    data: { type: "la_image_refresh", printerId: devId, printerName: pName, bambuUid: bambuUid || "" },
+                  }).catch(() => {});
                 }
               }
             },
