@@ -447,7 +447,7 @@ class MqttPrinterService {
                 if (!actToken || sentTokens.has(actToken)) continue;
                 sentTokens.add(actToken);
                 try {
-                  const r = await apns.sendLiveActivityUpdate(actToken, contentState);
+                  const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10);
                   if (r?.success) {
                     log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}%`);
                   } else {
@@ -614,14 +614,28 @@ class MqttPrinterService {
           data: { type: "print_error", printerId: devId, printerName },
         };
       } else if (gcodeState === "RUNNING" && (effectivePrev === "IDLE" || effectivePrev === "FINISH" || effectivePrev === "FAILED" || effectivePrev === "PREPARE")) {
+        // Fetch cover image URL from tasks API for the LA thumbnail
+        let coverUrl = null;
+        try {
+          const { fetchTasks } = require("./bambuClient");
+          const freshToken = await ensureFreshToken(user);
+          if (freshToken) {
+            const tasks = await fetchTasks(freshToken, 5);
+            const task = tasks.find(t => t?.deviceId === devId);
+            if (task?.cover) coverUrl = task.cover;
+          }
+        } catch {}
+
         notification = {
           title: `🖨 ${printerName} started printing`,
           body: jobTitle,
-          data: { type: "print_started", printerId: devId, printerName, progressPct: state.mc_percent, remainingSec: (state.mc_remaining_time || 0) * 60 },
+          data: { type: "print_started", printerId: devId, printerName, progressPct: state.mc_percent, remainingSec: (state.mc_remaining_time || 0) * 60, coverUrl },
         };
       }
 
       if (notification && user.expo_push_token) {
+        // Include bambuUid so NSE can fetch camera frames
+        if (notification.data) notification.data.bambuUid = user.bambu_uid || "";
         await sendPush(user.expo_push_token, notification);
         let apnsSuccess = false;
 
@@ -658,9 +672,11 @@ class MqttPrinterService {
                   startTime: nowSec, endTime: nowSec,
                   status: isCancelled ? "cancelled" : "finished",
                 });
-                if (r?.success) apnsSuccess = true;
+                if (r?.success) {
+                  apnsSuccess = true;
+                  await clearActivityToken(userId, devId); // clean up after successful end
+                }
                 if (isTokenInvalid(r)) await clearActivityToken(userId, devId);
-                await clearActivityToken(userId, devId); // clean up after end
                 log.info(`[MQTT-LA] print_${isCancelled ? "cancelled" : "finished"} for ${devId}: ${r?.success ? "sent" : "failed"}`);
               } else {
                 log.warn(`[MQTT-LA] No activity token for ${devId}, cannot end LA`);

@@ -18,6 +18,18 @@ router.get("/bridge/status", (req, res) => {
   });
 });
 
+// GET /api/printer/frame/:uid/:printerId — latest camera frame as JPEG
+router.get("/printer/frame/:uid/:printerId", (req, res) => {
+  const { uid, printerId } = req.params;
+  const frame = wsManager.getLatestFrame(uid, printerId);
+  if (!frame) {
+    return res.status(404).end();
+  }
+  res.set("Content-Type", "image/jpeg");
+  res.set("Cache-Control", "no-store");
+  res.send(frame);
+});
+
 // GET /api/printer-states — notification-driven printer states
 // Auth: pass expoPushToken to identify the user (same token used for registration)
 router.get("/printer-states", async (req, res) => {
