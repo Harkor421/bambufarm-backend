@@ -623,8 +623,13 @@ class MqttPrinterService {
             const tasks = await fetchTasks(freshToken, 5);
             const task = tasks.find(t => t?.deviceId === devId);
             if (task?.cover) coverUrl = task.cover;
+            log.info(`[MQTT] Cover for ${devId}: ${coverUrl ? coverUrl.slice(0, 60) + '...' : 'none'}`);
+          } else {
+            log.warn(`[MQTT] Could not refresh token to fetch cover for ${devId}`);
           }
-        } catch {}
+        } catch (e) {
+          log.warn(`[MQTT] Cover fetch failed for ${devId}: ${e.message}`);
+        }
 
         notification = {
           title: `🖨 ${printerName} started printing`,
