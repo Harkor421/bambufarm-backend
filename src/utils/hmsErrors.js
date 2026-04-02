@@ -1,188 +1,304 @@
 /**
- * Bambu Lab HMS Error Code Database
+ * Bambu Lab HMS Error Code Database (268 codes)
  * Source: https://github.com/suchmememanyskill/bambu-error-codes
  *
- * HMS codes from MQTT come as { attr, code } where:
- *   attr = 0xAABBCCDD → lookup key prefix = AABB
- *   code = 0xEEFFGGHH → lookup key suffix = GGHH
- *   Combined lookup: "AABB_GGHH"
+ * MQTT HMS alerts come as { attr, code } (32-bit integers).
+ * Lookup key = attr_hex[0:4] + "_" + code_hex[4:8]
+ * Example: attr=0x07009700 code=0x00030001 → key="0700_0001"
  */
 
-// Full HMS codes from Bambu wiki (attr-attr-code-code format → looked up by "AAAABBBB_CCCCDDDD")
-const HMS_FULL = {
-  "07002000_00020001": "AMS filament has run out.",
-  "07002000_00030001": "AMS filament has run out. Purging old filament.",
-  "07002000_00020004": "AMS filament may be broken in the toolhead.",
-  "07005500_00010004": "AMS binding error with the extruder. Perform AMS initialization again.",
-  "07005600_00030001": "AMS failed to send filament. Check PTFE tubes.",
-  "07007000_00020001": "Failed to pull filament from the toolhead to AMS.",
-  "07007000_00020004": "Failed to pull back filament. Check if filament or spool is stuck.",
-  "07008000_00010004": "AMS sensor abnormal. Check AMS connection.",
-  "07009000_00010004": "AMS exhaust valve sensor abnormal. Contact support.",
-  "07009700_00030001": "AMS filament has run out. Purging old filament.",
-  "07005600_00020001": "AMS filament has run out.",
-};
-
 const HMS_CODES = {
+  "1201_8007": "Failed to extrude the filament. The extruder may be clogged or the filament may be stuck; please refer to HMS. After troubleshooting, click 'Retry' button.",
+  "1202_8007": "Failed to extrude the filament. The extruder may be clogged or the filament may be stuck; please refer to HMS. After troubleshooting, click 'Retry' button.",
+  "1203_8007": "Failed to extrude the filament. The extruder may be clogged or the filament may be stuck; please refer to HMS. After troubleshooting, click 'Retry' button.",
+  "1201_8014": "Failed to check the filament location in the tool head; please refer to the HMS. After troubleshooting, click the 'Retry' button.",
+  "1202_8014": "Failed to check the filament location in the tool head; please refer to the HMS. After troubleshooting, click the 'Retry' button.",
+  "0501_4038": "The region settings do not match the printer; please check the printer's region settings.",
+  "1201_8016": "The extruder is not extruding normally; please refer to the HMS. After trouble shooting. If the defects are acceptable, please click 'Retry' button.",
+  "1202_8016": "The extruder is not extruding normally; please refer to the HMS. After trouble shooting. If the defects are acceptable, please click 'Retry' button.",
+  "1203_8016": "The extruder is not extruding normally; please refer to the HMS. After trouble shooting. If the defects are acceptable, please click 'Retry' button.",
+  "0300_8015": "The filament has run out; please load new filament. If the filament is loaded, please select 'Resume'.",
+  "0501_4033": "Your APP region is not matched with your printer; please download the APP in the corresponding region and register your account again.",
+  "0300_8017": "Foreign objects detected on hotbed. Please check and clean the hotbed, then tap 'Resume' button to resume the print job.",
+  "0514_039": "Device login has expired; please try to bind again.",
+  "1000_C001": "High bed temperature may lead to filament clogging in the nozzle. You may open the chamber door.",
+  "0300_8010": "The hotend fan speed is abnormal.",
+  "1200_8006": "Unable to feed filament into the extruder. This could be due to entangled filament or a stuck spool. If not, please check if the AMS PTFE tube is connected.",
+  "1200_8016": "The extruder is not extruding normally. Refer to the Assistant for troubleshooting. There may be defects in this layer, you may resume if the defects are acceptable.",
+  "0500_403A": "The current temperature is too low. In order to protect you and your printer. Printing task, moving axis and other operations are disabled. Please move the printer to an environment above 10 celsius degree.",
+  "0700_8006": "Unable to feed filament into the extruder. This could be due to entangled filament or a stuck spool. If not, please check if the AMS PTFE tube is connected.",
+  "0300_8013": "Printing was paused by the user. You can select 'Resume' to continue printing.",
   "0300_4000": "Printing stopped because homing Z axis failed.",
-  "0300_4001": "Printer timed out waiting for nozzle to cool down before homing.",
-  "0300_4002": "Printing stopped because Auto Bed Leveling failed.",
-  "0300_4003": "Nozzle temperature malfunction.",
-  "0300_4004": "Heatbed temperature malfunction.",
+  "0500_4003": "Printing stopped because the printer was unable to parse the file. Please resend your print job.",
+  "0500_4004": "The printer can't receive new print jobs while printing. Resend after the current print finishes.",
+  "0700_8002": "The cutter is stuck. Please make sure the cutter handle is out.",
+  "0700_8003": "Failed to pull out the filament from the extruder. This might be caused by clogged extruder or filament broken inside the extruder.",
+  "0700_8004": "AMS failed to pull back filament. This could be due to a stuck spool or the end of the filament being stuck in the path.",
+  "0700_8005": "The AMS failed to send out filament. You can clip the end of your filament flat, and reinsert. If this message persists, please check the PTFE tubes in AMS for any signs of wear and tear.",
+  "0700_8007": "Extruding filament failed. The extruder might be clogged.",
+  "0700_8010": "The AMS assist motor is overloaded. This could be due to entangled filament or a stuck spool.",
+  "0701_8003": "Failed to pull out the filament from the extruder. There may be an extruder clog or broken filament inside the extruder.",
+  "0701_8004": "AMS failed to pull back filament. This could be due to a stuck spool or the end of the filament being stuck in the path.",
+  "0701_8005": "The AMS failed to send filament. You canclip the end of your filament flat, and reinsert. If this message persists, please check the PTFE tubes in AMS for any signs of wear and tear.",
+  "0701_8010": "The AMS assist motor is overloaded. This could be due to entangled filament or a stuck spool.",
+  "0700_4001": "The AMS has been disabled for a print, but it still has filament loaded. Please unload the AMS filament , and switch to the spool holder filament for printing.",
+  "0500_4014": "Slicing for the print job failed. Please check your settings and restart the print job.",
+  "1200_8001": "Cutting the filament failed. Please check to see if the cutter is stuck. Refer to the Assistant for solutions.",
+  "1200_8007": "Failed to extrude the filament. This might be caused by clogged extruder or stuck filament. Refer to the Assistant for solutions.",
+  "1200_8010": "Filament or spool may be stuck.",
+  "1200_8014": "The filament location in the toolhead was not found. Refer to the Assistant for solutions.",
+  "1200_8015": "Failed to pull out the filament from the toolhead. Please check if the filament is stuck, or the filament is broken inside the extruder or PTFE tube.",
+  "0300_4002": "Printing Stopped because Auto Bed Leveling failed.",
+  "0300_8002": "First layer defects were detected by the Micro Lidar. Please check the quality of the printed model before continuing your print.",
+  "0300_8003": "Spaghetti defects were detected by the AI Print Monitoring. Please check the quality of the printed model before continuing your print.",
+  "0300_8004": "Filament ran out. Please load new filament.",
+  "0300_8005": "Toolhead front cover fell off. Please remount the front cover and check to make sure your print is going okay.",
+  "0300_8006": "The build plate marker was not detected. Please confirm the build plate is correctly positioned on the heatbed with all four corners aligned, and the maker is clear.",
+  "0700_8011": "AMS filament ran out. Please insert a new filament into the same AMS slot.",
+  "0701_8011": "AMS filament ran out. Please insert a new filament into the same AMS slot.",
+  "0702_8011": "AMS filament ran out. Please insert a new filament into the same AMS slot.",
+  "0703_8011": "AMS filament ran out. Please insert a new filament into the same AMS slot.",
+  "0300_8007": "There was an unfinished print job when the printer lost power. If the model is still adhered to the build plate, you can try resuming the print job.",
+  "0300_8008": "Printing Stopped because nozzle temperature problem.",
+  "0300_800B": "The cutter is stuck. Please make sure the cutter handle is out.",
+  "1200_8011": "AMS filament ran out. Please insert a new filament into the same AMS slot.",
+  "0300_8011": "Detected build plate is not the same as the Gcode file. Please adjust slicer settings or use the correct plate.",
+  "0701_8006": "Unable to feed filament into the extruder. This could be due to entangled filament or a stuck spool.",
+  "0300_800A": "A Filament pile-up was detected by the AI Print Monitoring. Please clean the filament from the waste chute.",
+  "07FF_8006": "Please feed filament into the PTFE tube until it can not be pushed any farther.",
+  "07FF_C003": "Please pull out the filament on the spool holder. If this message persists, please check to see if there is filament broken in the extruder or PTFE Tube. (Connect PTFE tube if you are about to use AMS)",
+  "07FF_C006": "Please feed filament into the PTFE tube until it can not be pushed any farther.",
+  "12FF_8003": "Please pull out the filament on the spool holder. If this message persists, please check to see if there is filament broken in the extruder or PTFE Tube. (Connect PTFE tube if you are about to use AMS)",
+  "12FF_C003": "Please pull out the filament on the spool holder. If this message persists, please check to see if there is filament broken in the extruder or PTFE Tube. (Connect PTFE tube if you are about to use AMS)",
+  "12FF_8006": "Please feed filament into the PTFE tube until it can not be pushed any farther.",
+  "12FF_C006": "Please feed filament into the PTFE tube until it can not be pushed any farther.",
+  "12FF_8010": "Please check if the filament or the spool is stuck.",
+  "07FF_8003": "Please pull out the filament on the spool holder. If this message persists, please check to see if there is filament broken in the extruder. (Connect PTFE tube if you are about to use AMS)",
+  "1000_C003": "Enabling traditional timelapse might lead to defects. Please enable it as needed?",
+  "1200_8004": "Failed to pull back the filament from the toolhead. Please check whether the filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "0C00_8005": "Purged filament has piled up in the waste chute, which may cause a tool head collision.",
+  "0C00_C006": "Purged filament may have piled up in the waste chute.",
+  "0500_4015": "There is not enough free storage space for the print job. Please format or clean MicroSD card to release available space.",
+  "0500_C010": "MicroSD Card read/write exception. please reinsert or replace MicroSD Card .",
+  "0300_8018": "Chamber temperature malfunction.",
+  "0300_8019": "No build plate is placed.",
+  "0300_8014": "The nozzle is covered with filaments, or the build plate is installed incorrectly. Please cancel this printing and clean the nozzle or adjust the build plate according to the actual status, or tap 'Resume' button to resume the print job.",
+  "0300_8016": "The nozzle is clogged up with filaments. Please cancel this printing and clean the nozzle according to the actual status, or tap 'Resume' button to resume the print job.",
   "0300_4005": "The nozzle fan speed is abnormal.",
+  "0300_400F": "No build plate is placed.",
+  "0500_4002": "Unsupported print file path or name. Please resend the printing job.",
+  "0500_8036": "Your sliced file is not consistent with the current printer model. Continue?",
+  "0500_4037": "Your sliced file is not compatible with current printer model. This file can't be printed on this printer.",
+  "0500_4038": "The nozzle diameter in sliced file is not consistent with the current nozzle setting. This file can't be printed.",
+  "1000_C002": "Printing CF material with stainless steel may cause nozzle damage.",
+  "1001_C001": "Timelapse is not supported because Spiral vase is enabled in slicing presets.",
+  "1001_C002": "Timelapse is not supported because Print sequence is set to 'By object'.",
+  "0501_4035": "The device is in the process of binding and cannot respond to new binding requests.",
+  "0501_4032": "QR code binding is in progress, so device discovery binding cannot be performed. You can scan the QR code on the screen for binding or exit the QR code display page on screen and try device discovery binding.",
+  "1202_8005": "Failed to feed the filament. Please load the filament, then click the 'Retry' button.",
+  "1203_8005": "Failed to feed the filament. Please load the filament, then click the 'Retry' button.",
+  "12FF_8005": "Failed to feed the filament. Please load the filament, then click the 'Retry' button.",
+  "1202_8006": "Failed to feed the filament into the toolhead. Please check whether the filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "1203_8006": "Failed to feed the filament into the toolhead. Please check whether the filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "1202_8010": "Please check if the spool or filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "1203_8010": "Please check if the spool or filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "1202_8011": "AMS filament has run out. Please insert a new filament into the AMS and click the 'Retry' button.",
+  "1203_8011": "AMS filament has run out. Please insert a new filament into the AMS and click the 'Retry' button.",
+  "12FF_8011": "AMS filament has run out. Please insert a new filament into the AMS and click the 'Retry' button.",
+  "1202_8012": "Failed to get AMS mapping table; please click the 'Retry' button to continue.",
+  "1203_8012": "Failed to get AMS mapping table; please click the 'Retry' button to continue.",
+  "12FF_8012": "Failed to get AMS mapping table; please click the 'Retry' button to continue.",
+  "1202_8013": "Timeout while purging old filament. Please check if the filament is stuck or the extruder clogged. After troubleshooting, click the 'Retry' button.",
+  "1203_8013": "Timeout while purging old filament. Please check if the filament is stuck or the extruder clogged. After troubleshooting, click the 'Retry' button.",
+  "12FF_8013": "Timeout while purging old filament. Please check if the filament is stuck or the extruder clogged. After troubleshooting, click the 'Retry' button.",
+  "1202_8015": "Failed to pull back the filament from the toolhead. Please check if the filament is stuck or is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "1203_8015": "Failed to pull back the filament from the toolhead. Please check if the filament is stuck or is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "1203_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "12FF_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "1203_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "12FF_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "1203_8003": "Failed to pull out the filament from the extruder. Please check whether the extruder is clogged or whether the filament is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "1202_8004": "Failed to pull back the filament from the toolhead. Please check whether the filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "1203_8004": "Failed to pull back the filament from the toolhead. Please check whether the filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "12FF_8004": "Failed to pull back the filament from the toolhead. Please check whether the filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "0700_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "0701_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "0701_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "0701_8007": "Failed to extrude the filament. Please check if the extruder clogged. After troubleshooting, click the 'Retry' button.",
+  "0702_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "0702_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "0702_8003": "Failed to pull out the filament from the extruder. Please check whether the extruder is clogged or whether the filament is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "0702_8004": "Failed to pull back the filament from the toolhead to AMS. Please check whether the filament or the spool is stuck. After troubleshooting, click the 'Retry' button.",
+  "0702_8005": "Failed to feed the filament outside the AMS. Please clip the end of the filament flat and check to see if the spool is stuck. After troubleshooting, click the 'Retry' button.",
+  "0702_8006": "Failed to feed the filament into the toolhead. Please check whether the filament or the spool is stuck. After troubleshooting, click the 'Retry' button.",
+  "0702_8007": "Failed to extrude the filament. Please check if the extruder clogged. After troubleshooting, click the 'Retry' button.",
+  "0702_8010": "AMS assist motor is overloaded. Please check if the spool or filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "0703_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "0703_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "0703_8003": "Failed to pull out the filament from the extruder. Please check whether the extruder is clogged or whether the filament is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "0703_8004": "Failed to pull back the filament from the toolhead to AMS. Please check whether the filament or the spool is stuck. After troubleshooting, click the 'Retry' button.",
+  "0703_8005": "Failed to feed the filament outside the AMS. Please clip the end of the filament flat and check to see if the spool is stuck. After troubleshooting, click the 'Retry' button.",
+  "0703_8006": "Failed to feed the filament into the toolhead. Please check whether the filament or the spool is stuck. After troubleshooting, click the 'Retry' button.",
+  "0703_8007": "Failed to extrude the filament. Please check if the extruder clogged. After troubleshooting, click the 'Retry' button.",
+  "0703_8010": "AMS assist motor is overloaded. Please check if the spool or filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "0700_8013": "Timeout purging old filament: Please check if the filament is stuck or the extruder is clogged. After troubleshooting, click the 'Retry' button.",
+  "0701_8013": "Timeout purging old filament: Please check if the filament is stuck or the extruder is clogged. After troubleshooting, click the 'Retry' button.",
+  "0702_8013": "Timeout purging old filament: Please check if the filament is stuck or the extruder is clogged. After troubleshooting, click the 'Retry' button.",
+  "0703_8013": "Timeout purging old filament: Please check if the filament is stuck or the extruder is clogged. After troubleshooting, click the 'Retry' button.",
+  "07FF_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "07FF_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "07FF_8005": "Failed to feed the filament outside the AMS. Please clip the end of the filament flat and check to see if the spool is stuck. After troubleshooting, click the 'Retry' button.",
+  "07FF_8010": "AMS assist motor is overloaded. Please check if the spool or filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "07FF_8011": "AMS filament ran out. Please put a new filament into AMS and click the 'Retry' button.",
+  "07FF_8013": "Timeout purging old filament: Please check if the filament is stuck or the extruder is clogged. After troubleshooting, click the 'Retry' button.",
+  "1201_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "1202_8001": "Failed to cut the filament. Please check the cutter. After troubleshooting, click the 'Retry' button.",
+  "1200_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "1201_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "1202_8002": "The cutter is stuck. Please pull out the cutter handle and click the 'Retry' button.",
+  "1200_8003": "Failed to pull out the filament from the extruder. Please check whether the extruder is clogged or whether the filament is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "1201_8003": "Failed to pull out the filament from the extruder. Please check whether the extruder is clogged or whether the filament is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "1202_8003": "Failed to pull out the filament from the extruder. Please check whether the extruder is clogged or whether the filament is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "1201_8004": "Failed to pull back the filament from the toolhead. Please check whether the filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "1200_8005": "Failed to feed the filament. Please load the filament, then click the 'Retry' button.",
+  "1201_8005": "Failed to feed the filament. Please load the filament and then click the 'Retry' button.",
+  "1201_8006": "Failed to feed the filament into the toolhead. Please check whether the filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "1201_8010": "Please check if the spool or filament is stuck. After troubleshooting, click the 'Retry' button.",
+  "1201_8011": "AMS filament has run out. Please insert a new filament into the AMS and click the 'Retry' button.",
+  "1200_8012": "Failed to get AMS mapping table. Please click the 'Retry' button to continue.",
+  "1201_8012": "Failed to get AMS mapping table; please click the 'Retry' button to continue.",
+  "1200_8013": "Timeout while purging old filament. Please check if the filament is stuck or the extruder clogged. After troubleshooting, click the 'Retry' button.",
+  "1201_8013": "Timeout while purging old filament. Please check if the filament is stuck or the extruder clogged. After troubleshooting, click the 'Retry' button.",
+  "1203_8014": "Failed to check the filament location in the tool head; please refer to the HMS. After troubleshooting, click the 'Retry' button.",
+  "1201_8015": "Failed to pull back the filament from the toolhead. Please check if the filament is stuck or the filament is broken inside the extruder. After troubleshooting, click the 'Retry' button.",
+  "0300_800D": "Some objects have fallen down, or the extruder is not extruding normally. If the defects are acceptable, click 'Resume' button to resume the print job.",
+  "0C00_8001": "First layer defects were detected. If the defects are acceptable, click 'Resume' button to resume the print job.",
+  "0500_8030": "",
+  "0500_402E": "The system does not support the file system currently used by the Micro SD card. Please replace the Micro SD card or format the current Micro SD card to FAT32.",
+  "0500_402F": "The Micro SD card sector data is damaged. Please use the SD card repair tool to repair or format it. If it still cannot be identified, please replace the Micro SD card.",
+  "0501_4017": "Binding failed. Please retry or restart the printer and retry.",
+  "0501_4018": "Binding configuration information parsing failed,  please try again.",
+  "0501_4019": "The printer has already been bound. Please unbind it and try again.",
+  "0501_401A": "Cloud access failed. Possible reasons include network instability caused by interference, inability to access the internet, or router firewall configuration restrictions. You can try moving the printer closer to the router or checking the router configuration and then try again.",
+  "0501_401B": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_401C": "Cloud access is rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_401D": "Cloud access failed, which may be caused by network instability due to interference. You can try moving the printer closer to the router before you try again.",
+  "0501_401E": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_401F": "Authorization timed out. Please make sure that your phone or PC has access to the internet, and ensure that the Bambu Studio/Bambu Handy APP is running in the foreground during the binding operation.",
+  "0501_4020": "Cloud access rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_4021": "Cloud access failed, which may be caused by network instability due to interference. You can try moving the printer closer to the router before you try again.",
+  "0501_4022": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_4023": "Cloud access rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_4024": "Cloud access failed. Possible reasons include network instability caused by interference, inability to access the internet, or router firewall configuration restrictions. You can try moving the printer closer to the router or checking the router configuration before you try again.",
+  "0501_4025": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_4026": "Cloud access rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_4027": "Cloud access failed; this may be caused by network instability due to interference. You can try moving the printer closer to the router before you try again.",
+  "0501_4028": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_4029": "Cloud access is rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0501_4031": "Device discovery binding is in progress, and the QR code cannot be displayed on the screen. You can wait for the binding to finish or abort the device discovery binding process in the APP/Studio and retry scanning the QR code on the screen for binding.",
+  "0501_4034": "The slicing progress has not been updated for a long time, and the printing task has exited. Please confirm the parameters and reinitiate printing.",
+  "07FF_8004": "Failed to pull back the filament from the toolhead to AMS. Please check whether the filament or the spool is stuck. After troubleshooting, click the 'retry' button.",
+  "0C00_800A": "The detected build plate is not the same as in G-code.",
+  "12FF_8007": "Check nozzle. Click 'Done' if filament was extruded, otherwise push filament forward slightly and click 'Retry.'",
+  "0300_8012": "",
+  "0500_402D": "System exception.",
+  "0500_4027": "Cloud access failed; this may be caused by network instability due to interference. You can try moving the printer closer to the router before you try again.",
+  "0500_4028": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_4029": "Cloud access is rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_402A": "Failed to connect to the router, which may be caused by wireless interference or being too far away from the router. Please try again or move the printer closer to the router and try again.",
+  "0500_402C": "Failed to obtain IP address, which may be caused by wireless interference resulting in data transmission failure or DHCP address pool of the router being full. Please move the printer closer to the router and try again. If the issue persists, please check router settings to see whether the IP addresses have been exhausted.",
+  "0500_4016": "The MicroSD Card is write-protected. Please replace the MicroSD Card.",
+  "0500_401A": "Cloud access failed. Possible reasons include network instability caused by interference, inability to access the internet, or router firewall configuration restrictions. You can try moving the printer closer to the router or checking the router configuration and then try again.",
+  "0500_401B": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_401C": "Cloud access is rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_401D": "Cloud access failed, which may be caused by network instability due to interference. You can try moving the printer closer to the router before you try again.",
+  "0500_401E": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_4020": "Cloud access rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_4021": "Cloud access failed, which may be caused by network instability due to interference. You can try moving the printer closer to the router before you try again.",
+  "0500_4022": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_4023": "Cloud access rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_4024": "Cloud access failed. Possible reasons include network instability caused by interference, inability to access the internet, or router firewall configuration restrictions. You can try moving the printer closer to the router or checking the router configuration before you try again.",
+  "0500_4025": "Cloud response is invalid. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_4026": "Cloud access rejected. If you have tried multiple times and are still failing, please contact customer service.",
+  "0500_401F": "Authorization timed out. Please make sure that your phone or PC has access to the internet, and ensure that the Bambu Studio/Bambu Handy APP is running in the foreground during the binding operation.",
+  "0500_402B": "Router connection failed due to incorrect password. Please check the password and try again.",
+  "0500_4017": "Binding failed. Please retry or restart the printer and retry.",
+  "0500_4018": "Binding configuration information parsing failed,  please try again.",
+  "0500_4019": "The printer has already been bound. Please unbind it and try again.",
+  "07FF_8007": "Please observe the nozzle. If the filament has been extruded, click 'Done'; if it is not, please push the filament forward slightly and then click 'Retry'.",
+  "1201_4001": "Filament is still loaded from the AMS when it has been disabled. Please unload AMS filament, load from spool holder, and restart print job.",
+  "1202_4001": "Filament is still loaded from the AMS when it has been disabled. Please unload AMS filament, load from spool holder, and restart print job.",
+  "1203_4001": "Filament is still loaded from the AMS when it has been disabled. Please unload AMS filament, load from spool holder, and restart print job.",
+  "12FF_4001": "Filament is still loaded from the AMS when it has been disabled. Please unload AMS filament, load from spool holder, and restart print job.",
+  "1200_4001": "Filament is still loaded from the AMS when it has been disabled. Please unload AMS filament, load from spool holder, and restart print job.",
+  "0300_800E": "The print file is not available. Please check to see if the storage media has been removed.",
+  "0500_8013": "The print file is not available. Please check to see if the storage media has been removed.",
+  "0500_4012": "The door seems to be open, so printing was paused.",
+  "0300_800F": "The door seems to be open, so printing was paused.",
+  "0500_C011": "",
+  "0500_400C": "Please insert a MicroSD card and restart the printing job.",
+  "07FF_8012": "Failed to get AMS mapping table; please click 'Retry' to continue.",
+  "07FF_4001": "Filament is still loaded from the AMS after it has been disabled. Please unload the filament, load from the spool holder, and restart printing.",
+  "0300_800C": "Skipping step detected, auto-recover complete; please resume print and check if there are any layer shift problems.",
+  "0500_400E": "Printing was cancelled.",
+  "0C00_8009": "Build plate localization marker was not found.",
+  "0500_400D": "Please run a self-test and restart the printing job.",
+  "0500_400B": "There was a problem downloading a file. Please check you network connection and resend the printing job.",
+  "0300_400A": "Mechanical resonance frequency identification failed.",
+  "0300_8009": "Heatbed temperature malfunction.",
+  "0300_400E": "The motor self-check failed.",
+  "0700_8012": "Failed to get AMS mapping table; please click 'Retry' to continue.",
+  "0701_8012": "Failed to get AMS mapping table; please click 'Retry' to continue.",
+  "0702_8012": "Failed to get AMS mapping table; please click 'Retry' to continue.",
+  "0703_8012": "Failed to get AMS mapping table; please click 'Retry' to continue.",
+  "0701_4001": "Filament is still loaded from the AMS after it has been disabled. Please unload the filament, load from the spool holder, and restart printing.",
+  "0702_4001": "Filament is still loaded from the AMS after it has been disabled. Please unload the filament, load from the spool holder, and restart printing.",
+  "0703_4001": "Filament is still loaded from the AMS after it has been disabled. Please unload the filament, load from the spool holder, and restart printing.",
+  "0C00_8002": "Spaghetti failure was detected.",
+  "0C00_C003": "Possible defects were detected in the first layer.",
+  "0C00_C004": "Possible spaghetti failure was detected.",
+  "0500_4007": "Print jobs are not allowed to be sent while force updating or when repair updating is required.",
+  "0500_4008": "Starting printing failed. please power cycle the printer and resend the print job.",
+  "0500_4009": "Print jobs are not allowed to be sent while updating logs.",
+  "0500_400A": "The file name is not supported. Please rename and restart the printing job.",
+  "0300_8001": "Printing was paused by the user. You can tap 'Resume' to resume the print job.",
+  "0500_4001": "Failed to connect to Bambu Cloud. Please check your network connection.",
+  "0500_4005": "Print jobs are not allowed to be sent while updating firmware.",
+  "0500_4006": "There is not enough free storage space for the print job. Restoring to factory settings can release available space.",
+  "0300_4001": "The printer timed out waiting for the nozzle to cool down before homing.",
   "0300_4006": "The nozzle is clogged.",
   "0300_4008": "The AMS failed to change filament.",
   "0300_4009": "Homing XY axis failed.",
-  "0300_400A": "Mechanical resonance frequency identification failed.",
   "0300_400B": "Internal communication exception.",
   "0300_400C": "Printing was cancelled.",
+  "300_400C": "Printing was cancelled.",
   "0300_400D": "Resume failed after power loss.",
-  "0300_400E": "The motor self-check failed.",
-  "0300_400F": "No build plate is placed.",
-  "0300_8000": "Printing was paused for unknown reason.",
-  "0300_8001": "Printing was paused by the user.",
-  "0300_8002": "First layer defects detected by Micro Lidar.",
-  "0300_8003": "Spaghetti defects detected by AI Print Monitoring.",
-  "0300_8004": "Filament ran out. Please load new filament.",
-  "0300_8005": "Toolhead front cover fell off. Please remount the front cover.",
-  "0300_8006": "Build plate marker was not detected.",
-  "0300_8007": "Unfinished print job after power loss.",
-  "0300_8008": "Nozzle temperature problem.",
-  "0300_8009": "Heatbed temperature malfunction.",
-  "0300_800A": "Filament pile-up detected by AI Print Monitoring.",
-  "0300_800B": "The cutter is stuck.",
-  "0300_800C": "Skipping step detected, auto-recover complete.",
-  "0300_800D": "Objects fell down or extruder not extruding normally.",
-  "0300_800E": "Print file not available. Check storage media.",
-  "0300_800F": "Door seems to be open, printing was paused.",
-  "0300_8010": "Hotend fan speed is abnormal.",
-  "0300_8011": "Build plate mismatch with G-code file.",
-  "0300_8013": "Printing was paused by the user.",
-  "0300_8014": "Nozzle covered with filaments or build plate installed incorrectly.",
-  "0300_8015": "Filament has run out. Please load new filament.",
-  "0300_8016": "Nozzle is clogged with filaments.",
-  "0300_8017": "Foreign objects detected on hotbed.",
-  "0300_8018": "Chamber temperature malfunction.",
-  "0300_8019": "No build plate is placed.",
-  "0500_4001": "Failed to connect to Bambu Cloud. Check network connection.",
-  "0500_4002": "Unsupported print file path or name.",
-  "0500_4003": "Printer unable to parse the file.",
-  "0500_4004": "Can't receive new print jobs while printing.",
-  "0500_4005": "Can't send print jobs while updating firmware.",
-  "0500_4006": "Not enough free storage space.",
-  "0500_4007": "Print jobs blocked during force update.",
-  "0500_4012": "Door seems to be open, printing was paused.",
-  "0500_4014": "Slicing for the print job failed.",
-  "0500_4015": "Not enough free storage space on MicroSD card.",
-  "0500_400B": "Problem downloading file. Check network connection.",
-  "0500_400C": "Please insert a MicroSD card.",
-  "0500_400D": "Run self-test and restart printing job.",
-  "0500_400E": "Printing was cancelled.",
-  "0500_402E": "MicroSD card file system not supported. Format to FAT32.",
-  "0500_402F": "MicroSD card data is damaged.",
-  "0700_4001": "AMS disabled but filament still loaded. Unload AMS filament.",
-  "0700_8001": "Failed to cut the filament. Check the cutter.",
-  "0700_8002": "The cutter is stuck. Pull out the cutter handle.",
-  "0700_8003": "Failed to pull filament from extruder. Possible clog or broken filament.",
-  "0700_8004": "AMS failed to pull back filament. Spool or filament may be stuck.",
-  "0700_8005": "AMS failed to send filament. Check PTFE tubes for wear.",
-  "0700_8006": "Unable to feed filament into extruder. Entangled filament or stuck spool.",
-  "0700_8007": "Extruding filament failed. Extruder might be clogged.",
-  "0700_8010": "AMS assist motor is overloaded. Entangled filament or stuck spool.",
-  "0700_8011": "AMS filament ran out. Insert new filament.",
-  "0700_8012": "Failed to get AMS mapping table.",
-  "0700_8013": "Timeout purging old filament. Check for stuck filament or clogged extruder.",
-  "0C00_8001": "First layer defects detected.",
-  "0C00_8002": "Spaghetti failure detected.",
-  "0C00_8005": "Purged filament piled up in waste chute.",
-  "0C00_8009": "Build plate localization marker not found.",
-  "0C00_800A": "Build plate mismatch with G-code.",
-  "0C00_C003": "Possible first layer defects detected.",
-  "0C00_C004": "Possible spaghetti failure detected.",
-  "0C00_C006": "Purged filament may have piled up in waste chute.",
-  "1000_C001": "High bed temperature may cause filament clogging. Open chamber door.",
-  "1000_C003": "Traditional timelapse might cause defects.",
-  "1200_8001": "Failed to cut filament. Check the cutter.",
-  "1200_8002": "The cutter is stuck.",
-  "1200_8003": "Failed to pull filament from extruder.",
-  "1200_8004": "Failed to pull back filament from toolhead.",
-  "1200_8006": "Unable to feed filament into extruder.",
-  "1200_8007": "Failed to extrude filament. Possible clog.",
-  "1200_8010": "Filament or spool may be stuck.",
-  "1200_8011": "AMS filament ran out.",
-  "1200_8013": "Timeout purging old filament.",
-  "1200_8014": "Filament location in toolhead not found.",
-  "1200_8015": "Failed to pull filament from toolhead.",
-  "1200_8016": "Extruder not extruding normally.",
+  "0300_8000": "Printing was paused for unknown reason. You can tap 'Resume' to resume the print job.",
+  "0300_4003": "Nozzle temperature malfunction.",
+  "0300_4004": "Heatbed temperature malfunction."
 };
 
 /**
  * Look up an HMS error description from the MQTT attr/code pair.
- * @param {number} attr - HMS attr field (e.g., 117479168 = 0x07009700)
- * @param {number} code - HMS code field (e.g., 196609 = 0x00030001)
+ * @param {number} attr - HMS attr field (e.g., 0x07009700)
+ * @param {number} code - HMS code field (e.g., 0x00030001)
  * @returns {string|null} Human-readable description or null
  */
 function lookupHmsError(attr, code) {
   const attrHex = (attr >>> 0).toString(16).padStart(8, "0");
   const codeHex = (code >>> 0).toString(16).padStart(8, "0");
 
-  // Try exact full match first (most accurate)
-  const fullKey = `${attrHex}_${codeHex}`.toUpperCase();
-  if (HMS_FULL[fullKey.toLowerCase()]) return HMS_FULL[fullKey.toLowerCase()];
-  if (HMS_FULL[fullKey]) return HMS_FULL[fullKey];
+  // Primary key: module (first 4 of attr) + error (last 4 of code)
+  const key = attrHex.slice(0, 4) + "_" + codeHex.slice(4, 8);
+  if (HMS_CODES[key]) return HMS_CODES[key];
 
-  // The database key format is: MMDD_SSEE where
-  //   MM = module (attr bytes 0-1), DD = device/sub (attr bytes 2-3)
-  //   SS = severity (attr byte 4-5), EE = error id (code last byte(s))
-  // Try multiple combinations to find a match
-  const keys = [
-    // Most common: module(4) + "_" + submodule(2) + errorId(2)
-    `${attrHex.slice(0, 4)}_${attrHex.slice(4, 6)}${codeHex.slice(6, 8)}`,
-    // Module(4) + "_" + full code suffix
-    `${attrHex.slice(0, 4)}_${codeHex.slice(4, 8)}`,
-    // Module(2)+"00" + "_" + submodule(2) + errorId(2)
-    `${attrHex.slice(0, 2)}00_${attrHex.slice(4, 6)}${codeHex.slice(6, 8)}`,
-    // Module(2) + "FF" + "_" + submodule(2) + errorId(2)
-    `${attrHex.slice(0, 2)}FF_${attrHex.slice(4, 6)}${codeHex.slice(6, 8)}`,
-    // Just module + error byte
-    `${attrHex.slice(0, 4)}_${codeHex.slice(0, 4)}`,
-  ];
+  // Fallback: try generic module (e.g., 0701 → 0700 for AMS slot-agnostic errors)
+  const genericKey = attrHex.slice(0, 2) + "00_" + codeHex.slice(4, 8);
+  if (HMS_CODES[genericKey]) return HMS_CODES[genericKey];
 
-  for (const key of keys) {
-    const upper = key.toUpperCase();
-    const lower = key.toLowerCase();
-    if (HMS_CODES[upper]) return HMS_CODES[upper];
-    if (HMS_CODES[lower]) return HMS_CODES[lower];
-  }
-
-  // Fallback: try replacing AMS slot-specific sub-modules with generic ones
-  // AMS slots use different sub-module IDs (20xx, 56xx, 97xx, etc.) but share the same errors
-  // Try matching with 00, 01, 02, 03, FF as the module suffix
-  const module = attrHex.slice(0, 2);
-  const errorByte = codeHex.slice(6, 8);
-  const suffixes = ["00", "01", "02", "03", "FF"];
-  for (const sfx of suffixes) {
-    const subModule = attrHex.slice(4, 6);
-    const tryKey = `${module}${sfx}_${subModule}${errorByte}`;
-    if (HMS_CODES[tryKey.toUpperCase()]) return HMS_CODES[tryKey.toUpperCase()];
-    if (HMS_CODES[tryKey]) return HMS_CODES[tryKey];
-  }
-
-  // Try with common sub-modules for AMS (0700 module)
-  if (module === "07") {
-    const errSuffix = codeHex.slice(6, 8);
-    for (const prefix of ["0700", "0701", "0702", "0703", "07FF", "0300", "1200"]) {
-      const subMod = attrHex.slice(4, 6);
-      const tryKeys = [
-        `${prefix}_${subMod}${errSuffix}`,
-        `${prefix}_80${errSuffix}`,
-      ];
-      for (const tk of tryKeys) {
-        if (HMS_CODES[tk.toUpperCase()]) return HMS_CODES[tk.toUpperCase()];
-        if (HMS_CODES[tk]) return HMS_CODES[tk];
-      }
-    }
-  }
+  // Fallback: try FF wildcard (e.g., 07FF, 12FF)
+  const wildcardKey = attrHex.slice(0, 2) + "FF_" + codeHex.slice(4, 8);
+  if (HMS_CODES[wildcardKey]) return HMS_CODES[wildcardKey];
 
   return null;
 }
@@ -196,8 +312,7 @@ function lookupHmsError(attr, code) {
 function formatHmsCode(attr, code) {
   const attrHex = (attr >>> 0).toString(16).padStart(8, "0").toUpperCase();
   const codeHex = (code >>> 0).toString(16).padStart(8, "0").toUpperCase();
-  return `${attrHex.slice(0, 4)}-${attrHex.slice(4, 8)}-${codeHex.slice(0, 4)}-${codeHex.slice(4, 8)}`;
+  return attrHex.slice(0, 4) + "-" + attrHex.slice(4, 8) + "-" + codeHex.slice(0, 4) + "-" + codeHex.slice(4, 8);
 }
 
-
-module.exports = { lookupHmsError, formatHmsCode };
+module.exports = { lookupHmsError, formatHmsCode, HMS_CODES };
