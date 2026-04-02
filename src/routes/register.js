@@ -87,8 +87,21 @@ router.post("/unregister", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Invalid expoPushToken format" });
     }
 
-    const result = await User.deleteOne({ expo_push_token: expoPushToken });
-    log.info(`[UNREGISTER] ${expoPushToken.slice(0, 30)}... (deleted: ${result.deletedCount})`);
+    const user = await User.findOne({ expo_push_token: expoPushToken });
+    if (user) {
+      const PrinterState = require("../db/models/PrinterState");
+      const NotificationHistory = require("../db/models/NotificationHistory");
+      const MessageState = require("../db/models/MessageState");
+      await Promise.all([
+        User.deleteOne({ _id: user._id }),
+        PrinterState.deleteMany({ user_id: user._id }),
+        NotificationHistory.deleteMany({ user_id: user._id }).catch(() => {}),
+        MessageState.deleteMany({ user_id: user._id }).catch(() => {}),
+      ]);
+      log.info(`[UNREGISTER] ${expoPushToken.slice(0, 30)}... (user + related data deleted)`);
+    } else {
+      log.info(`[UNREGISTER] ${expoPushToken.slice(0, 30)}... (not found)`);
+    }
     res.json({ ok: true });
   } catch (err) {
     log.error(`[UNREGISTER] Error: ${err.message}`);

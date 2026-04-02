@@ -227,6 +227,17 @@ class WsManager {
 
       if (isBinary && data.length > 3) {
         this._relayFrame(userId, data);
+      } else if (!isBinary) {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === "command_result" && msg.requestId) {
+            const cb = this._commandCallbacks?.get(msg.requestId);
+            if (cb) {
+              cb(msg.success, msg.error);
+              this._commandCallbacks.delete(msg.requestId);
+            }
+          }
+        } catch {}
       }
     });
 
@@ -244,6 +255,15 @@ class WsManager {
         this.bridgeMeta.delete(ws);
         const set = this.bridges.get(userId);
         if (set) { set.delete(ws); if (set.size === 0) this.bridges.delete(userId); }
+        // Clean up cached frames and throttle entries for this user
+        if (!this.isBridgeConnected(userId)) {
+          this.latestFrames.delete(userId);
+          if (this._frameThrottle) {
+            for (const key of this._frameThrottle.keys()) {
+              if (key.startsWith(`${userId}:`)) this._frameThrottle.delete(key);
+            }
+          }
+        }
         log.info(`[WS] Bridge disconnected for uid ${userId}`);
         this._notifyBridgeStatus(userId, this.isBridgeConnected(userId));
       }
@@ -504,6 +524,58 @@ class WsManager {
       try { ws.send(msg); } catch {}
     }
     log.debug(`[WS] Notified ${clients.size} app client(s) — bridge ${online ? "online" : "offline"} for uid ${userId}`);
+  }
+
+  /**
+   * Send a printer command via bridge relay.
+   * @param {string} userId - Bambu UID
+   * @param {string} devId - Printer device ID
+   * @param {string} action - "pause", "resume", "stop", "speed", "light", "gcode"
+   * @param {object} params - Action-specific parameters
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  sendPrinterCommand(userId, devId, action, params = {}) {
+    return new Promise((resolve) => {
+      const bridges = this.bridges.get(userId);
+      if (!bridges || bridges.size === 0) {
+        return resolve({ success: false, error: "No bridge connected" });
+      }
+
+      if (!this._commandCallbacks) this._commandCallbacks = new Map();
+      const requestId = `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      // Set timeout for response
+      const timeout = setTimeout(() => {
+        this._commandCallbacks.delete(requestId);
+        resolve({ success: false, error: "Bridge command timeout" });
+      }, 10000);
+
+      this._commandCallbacks.set(requestId, (success, error) => {
+        clearTimeout(timeout);
+        resolve({ success, error });
+      });
+
+      const msg = JSON.stringify({
+        type: "printer_command",
+        requestId,
+        devId,
+        action,
+        params,
+      });
+
+      // Send to first available bridge
+      for (const bridgeWs of bridges) {
+        if (bridgeWs.readyState === 1) {
+          bridgeWs.send(msg);
+          log.info(`[WS] Command ${action} → ${devId} sent via bridge`);
+          return;
+        }
+      }
+
+      clearTimeout(timeout);
+      this._commandCallbacks.delete(requestId);
+      resolve({ success: false, error: "Bridge WebSocket not open" });
+    });
   }
 
   close() {

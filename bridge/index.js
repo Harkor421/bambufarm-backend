@@ -16,6 +16,7 @@ const bambuCloud = require("./bambuCloud");
 const { scanAndMatch, getLocalIp } = require("./networkScanner");
 const { createCameraStream } = require("./cameraStream");
 const { BridgeWsClient } = require("./wsClient");
+const { PrinterMqttControl } = require("./mqttControl");
 
 const UI_PORT = 8095;
 
@@ -44,6 +45,7 @@ let wsState = "disconnected";
 const activeStreams = new Map();    // devId → { stop }
 const streamStates = new Map();    // devId → state string
 let demandedPrinters = new Set();
+const mqttControl = new PrinterMqttControl();
 let scanProgress = null;           // { message, progress } or null
 let loginPending = null;           // { email } if waiting for 2FA code
 
@@ -185,6 +187,11 @@ async function startBridge() {
   bridgeRunning = true;
   console.log(`[Bridge] Starting — ${config.printers.length} printers, connecting to ${DEFAULT_SERVER_URL}`);
 
+  // Connect local MQTT for all printers (needed for control commands)
+  for (const printer of config.printers) {
+    mqttControl.connect(printer.devId, printer.ip, printer.accessCode);
+  }
+
   wsClient = new BridgeWsClient({
     serverUrl: DEFAULT_SERVER_URL,
     bambuToken: token,
@@ -193,6 +200,13 @@ async function startBridge() {
       wsState = state;
       console.log(`[Bridge] Server: ${state}`);
     },
+    onCommand: (msg) => {
+      const { devId, action, params, requestId } = msg;
+      console.log(`[Bridge] Command: ${action} → ${devId}`);
+      const success = mqttControl.executeCommand(devId, action, params || {});
+      if (wsClient) wsClient.sendCommandResult(requestId, success, success ? null : "MQTT not connected");
+      console.log(`[Bridge] Command ${action} → ${devId}: ${success ? "sent" : "failed"}`);
+    },
   });
   wsClient.connect();
 }
@@ -200,6 +214,7 @@ async function startBridge() {
 function stopBridge() {
   bridgeRunning = false;
   stopAllCameras();
+  mqttControl.disconnectAll();
   demandedPrinters = new Set();
   if (wsClient) { wsClient.stop(); wsClient = null; }
   wsState = "disconnected";

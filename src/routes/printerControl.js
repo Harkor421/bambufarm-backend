@@ -1,5 +1,6 @@
 const { Router } = require("express");
 const mqttService = require("../services/mqttPrinterService");
+const wsManager = require("../services/wsManager");
 const User = require("../db/models/User");
 const log = require("../utils/logger");
 
@@ -36,88 +37,69 @@ async function resolveUser(req, res) {
   return null;
 }
 
-// POST /api/printer/pause
-router.post("/printer/pause", async (req, res) => {
+/**
+ * Generic command handler: tries bridge relay first, falls back to direct cloud MQTT.
+ * Bridge relay works for ALL commands (no signing needed on LAN).
+ * Cloud MQTT only works for light control (signing required for other commands).
+ */
+async function handleCommand(req, res, action, paramsFn) {
   try {
     const user = await resolveUser(req, res);
     if (!user) return;
     const { printerId } = req.body;
     if (!printerId) return res.status(400).json({ ok: false, error: "Missing printerId" });
 
-    const sent = mqttService.pausePrint(String(user._id), printerId);
-    log.info(`[CTRL] Pause ${printerId} for user ${user._id}: ${sent ? "sent" : "failed"}`);
-    res.json({ ok: sent, error: sent ? null : "MQTT not connected" });
+    const params = paramsFn ? paramsFn(req.body) : {};
+
+    // Try bridge relay first (works for all commands, no signing needed)
+    if (user.bambu_uid && wsManager.isBridgeConnected(user.bambu_uid)) {
+      const result = await wsManager.sendPrinterCommand(user.bambu_uid, printerId, action, params);
+      log.info(`[CTRL] ${action} ${printerId} via bridge: ${result.success ? "ok" : result.error}`);
+      return res.json({ ok: result.success, via: "bridge", error: result.error || null });
+    }
+
+    // Fallback: direct cloud MQTT (only works for light control on newer firmware)
+    let sent = false;
+    const userId = String(user._id);
+    switch (action) {
+      case "pause": sent = mqttService.pausePrint(userId, printerId); break;
+      case "resume": sent = mqttService.resumePrint(userId, printerId); break;
+      case "stop": sent = mqttService.stopPrint(userId, printerId); break;
+      case "speed": sent = mqttService.setSpeed(userId, printerId, params.level); break;
+      case "light": sent = mqttService.setLight(userId, printerId, params.on); break;
+      default: return res.status(400).json({ ok: false, error: "Unknown action" });
+    }
+    log.info(`[CTRL] ${action} ${printerId} via MQTT: ${sent ? "sent" : "failed"}`);
+    res.json({ ok: sent, via: "mqtt", error: sent ? null : "MQTT not connected" });
   } catch (err) {
-    log.error(`[CTRL] Pause error: ${err.message}`);
+    log.error(`[CTRL] ${action} error: ${err.message}`);
     res.status(500).json({ ok: false, error: "Internal error" });
   }
-});
+}
+
+// POST /api/printer/pause
+router.post("/printer/pause", (req, res) => handleCommand(req, res, "pause"));
 
 // POST /api/printer/resume
-router.post("/printer/resume", async (req, res) => {
-  try {
-    const user = await resolveUser(req, res);
-    if (!user) return;
-    const { printerId } = req.body;
-    if (!printerId) return res.status(400).json({ ok: false, error: "Missing printerId" });
-
-    const sent = mqttService.resumePrint(String(user._id), printerId);
-    log.info(`[CTRL] Resume ${printerId} for user ${user._id}: ${sent ? "sent" : "failed"}`);
-    res.json({ ok: sent, error: sent ? null : "MQTT not connected" });
-  } catch (err) {
-    log.error(`[CTRL] Resume error: ${err.message}`);
-    res.status(500).json({ ok: false, error: "Internal error" });
-  }
-});
+router.post("/printer/resume", (req, res) => handleCommand(req, res, "resume"));
 
 // POST /api/printer/stop
-router.post("/printer/stop", async (req, res) => {
-  try {
-    const user = await resolveUser(req, res);
-    if (!user) return;
-    const { printerId } = req.body;
-    if (!printerId) return res.status(400).json({ ok: false, error: "Missing printerId" });
-
-    const sent = mqttService.stopPrint(String(user._id), printerId);
-    log.info(`[CTRL] Stop ${printerId} for user ${user._id}: ${sent ? "sent" : "failed"}`);
-    res.json({ ok: sent, error: sent ? null : "MQTT not connected" });
-  } catch (err) {
-    log.error(`[CTRL] Stop error: ${err.message}`);
-    res.status(500).json({ ok: false, error: "Internal error" });
-  }
-});
+router.post("/printer/stop", (req, res) => handleCommand(req, res, "stop"));
 
 // POST /api/printer/speed
-router.post("/printer/speed", async (req, res) => {
-  try {
-    const user = await resolveUser(req, res);
-    if (!user) return;
-    const { printerId, level } = req.body;
-    if (!printerId || !level) return res.status(400).json({ ok: false, error: "Missing printerId or level" });
-    if (![1, 2, 3, 4].includes(Number(level))) return res.status(400).json({ ok: false, error: "Level must be 1-4" });
-
-    const sent = mqttService.setSpeed(String(user._id), printerId, Number(level));
-    log.info(`[CTRL] Speed ${printerId} → ${level} for user ${user._id}: ${sent ? "sent" : "failed"}`);
-    res.json({ ok: sent });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: "Internal error" });
+router.post("/printer/speed", (req, res) => {
+  const { level } = req.body;
+  if (!level || ![1, 2, 3, 4].includes(Number(level))) {
+    return res.status(400).json({ ok: false, error: "Level must be 1-4" });
   }
+  handleCommand(req, res, "speed", () => ({ level: Number(level) }));
 });
 
 // POST /api/printer/light
-router.post("/printer/light", async (req, res) => {
-  try {
-    const user = await resolveUser(req, res);
-    if (!user) return;
-    const { printerId, on } = req.body;
-    if (!printerId || on === undefined) return res.status(400).json({ ok: false, error: "Missing printerId or on" });
-
-    const sent = mqttService.setLight(String(user._id), printerId, !!on);
-    log.info(`[CTRL] Light ${printerId} → ${on ? "on" : "off"} for user ${user._id}: ${sent ? "sent" : "failed"}`);
-    res.json({ ok: sent });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: "Internal error" });
-  }
+router.post("/printer/light", (req, res) => {
+  const { on } = req.body;
+  if (on === undefined) return res.status(400).json({ ok: false, error: "Missing on" });
+  handleCommand(req, res, "light", () => ({ on: !!on }));
 });
 
 // GET /api/printer/mqtt-state — get real-time MQTT state for all printers

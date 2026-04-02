@@ -417,9 +417,12 @@ class MqttPrinterService {
                 fail_count: { $lt: 5 },
               }).lean();
               log.debug(`[MQTT] Notifying ${allSameAccount.length} user(s) for uid ${bambuUid}`);
-              // Track which push-to-start tokens we've already sent to avoid duplicates
+              // Deduplicate by expo_push_token AND push-to-start token
+              const sentPushTokens = new Set();
               const sentPushToStartTokens = new Set();
               for (const u of allSameAccount) {
+                if (sentPushTokens.has(u.expo_push_token)) continue;
+                sentPushTokens.add(u.expo_push_token);
                 const skipPushToStart = u.la_push_to_start_token && sentPushToStartTokens.has(u.la_push_to_start_token);
                 if (u.la_push_to_start_token) sentPushToStartTokens.add(u.la_push_to_start_token);
                 await this._handleStateChange(u, devId, state, prevGcodeState, skipPushToStart, printerNames);

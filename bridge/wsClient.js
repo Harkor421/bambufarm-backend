@@ -18,11 +18,20 @@ class BridgeWsClient {
    * @param {(printers: string[]) => void} opts.onDemandUpdate - called when server says which printers to stream
    * @param {(state: string) => void} opts.onStateChange
    */
-  constructor({ serverUrl, bambuToken, onDemandUpdate, onStateChange }) {
+  /**
+   * @param {Object} opts
+   * @param {string} opts.serverUrl
+   * @param {string} opts.bambuToken
+   * @param {(printers: string[]) => void} opts.onDemandUpdate
+   * @param {(state: string) => void} opts.onStateChange
+   * @param {(data: {devId: string, action: string, params: object, requestId: string}) => void} [opts.onCommand]
+   */
+  constructor({ serverUrl, bambuToken, onDemandUpdate, onStateChange, onCommand }) {
     this.serverUrl = serverUrl;
     this.bambuToken = bambuToken;
     this.onDemandUpdate = onDemandUpdate;
     this.onStateChange = onStateChange;
+    this.onCommand = onCommand;
 
     this.ws = null;
     this.authenticated = false;
@@ -64,6 +73,8 @@ class BridgeWsClient {
           this._startHeartbeat();
         } else if (msg.type === "demand_update") {
           this.onDemandUpdate(msg.printers || []);
+        } else if (msg.type === "printer_command" && this.onCommand) {
+          this.onCommand(msg);
         }
       } catch {}
     });
@@ -98,6 +109,19 @@ class BridgeWsClient {
 
     const frame = Buffer.concat([header, idBuf, jpegData]);
     this.ws.send(frame);
+  }
+
+  /**
+   * Send command result back to server.
+   */
+  sendCommandResult(requestId, success, error) {
+    if (!this.authenticated || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({
+      type: "command_result",
+      requestId,
+      success,
+      error: error || null,
+    }));
   }
 
   stop() {
