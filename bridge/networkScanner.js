@@ -9,9 +9,9 @@ const tls = require("tls");
 const os = require("os");
 
 const CAMERA_PORT = 6000;
-const PROBE_TIMEOUT = 800;
+const PROBE_TIMEOUT = 1200;
 const AUTH_TIMEOUT = 3000;
-const BATCH_SIZE = 40;
+const BATCH_SIZE = 50;
 
 /**
  * Get the local IP address (first non-internal IPv4 address).

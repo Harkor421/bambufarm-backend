@@ -67,6 +67,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.1.7",
+    "mqtt": "^5.15.0",
     "open": "^10.1.0",
     "ws": "^8.18.0"
   },

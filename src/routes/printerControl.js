@@ -52,6 +52,7 @@ async function handleCommand(req, res, action, paramsFn) {
     const params = paramsFn ? paramsFn(req.body) : {};
 
     // Try bridge relay first (works for all commands, no signing needed)
+    log.info(`[CTRL] ${action} ${printerId}: uid=${user.bambu_uid} bridge=${wsManager.isBridgeConnected(user.bambu_uid || "")}`);
     if (user.bambu_uid && wsManager.isBridgeConnected(user.bambu_uid)) {
       const result = await wsManager.sendPrinterCommand(user.bambu_uid, printerId, action, params);
       log.info(`[CTRL] ${action} ${printerId} via bridge: ${result.success ? "ok" : result.error}`);

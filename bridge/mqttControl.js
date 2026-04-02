@@ -39,6 +39,21 @@ class PrinterMqttControl {
     client.on("connect", () => {
       entry.connected = true;
       console.log(`[MQTT-Ctrl] Connected to ${devId} (${ip})`);
+      // Subscribe to report topic to see command responses
+      client.subscribe(`device/${devId}/report`, { qos: 1 });
+    });
+
+    client.on("message", (topic, payload) => {
+      try {
+        const json = JSON.parse(payload.toString());
+        // Log state changes and security responses
+        if (json.print?.gcode_state) {
+          console.log(`[MQTT-Ctrl] ${devId} state: ${json.print.gcode_state}`);
+        }
+        if (json.security) {
+          console.log(`[MQTT-Ctrl] ${devId} security:`, JSON.stringify(json.security));
+        }
+      } catch {}
     });
 
     client.on("close", () => {
