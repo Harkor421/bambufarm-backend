@@ -410,6 +410,9 @@ class MqttPrinterService {
             accessToken,
             printerIds,
             onStateChange: async (devId, state, prevGcodeState) => {
+              // Update bridge camera demand when print state changes
+              wsManager._notifyBridgeDemand(bambuUid);
+
               // Send to ALL user records with the same Bambu UID
               const allSameAccount = await User.find({
                 bambu_uid: bambuUid,
@@ -434,9 +437,22 @@ class MqttPrinterService {
               if (bambuUid === "1789751384" &&
                   (gcState === "FINISH" || gcState === "IDLE" || gcState === "FAILED") &&
                   (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE" || prevGcodeState === "PREPARE")) {
+                // Small delay to ensure last camera frames are cached
+                await new Promise(r => setTimeout(r, 2000));
                 try {
-                  const frame = wsManager.getLatestFrame(bambuUid, devId);
-                  log.info(`[MQTT] Tecnoprints frame for ${devId}: ${frame ? frame.length + " bytes" : "no frame (bridge offline?)"}`);
+                  // Try in-memory frame first, then fetch via HTTP
+                  let frame = wsManager.getLatestFrame(bambuUid, devId);
+                  if (!frame || frame.length < 100) {
+                    try {
+                      const axios = require("axios");
+                      const r = await axios.get(`https://bambufarm-api-production.up.railway.app/api/printer/frame/${bambuUid}/${devId}`, {
+                        responseType: "arraybuffer", timeout: 5000,
+                        headers: { "X-API-Key": process.env.API_KEY },
+                      });
+                      if (r.status === 200 && r.data?.length > 100) frame = Buffer.from(r.data);
+                    } catch {}
+                  }
+                  log.info(`[MQTT] Tecnoprints frame for ${devId}: ${frame ? frame.length + " bytes" : "no frame"}`);
                   const wasCancelled = gcState === "FAILED" || (state.mc_percent || 0) < 90;
                   const msg = wasCancelled
                     ? `🚫 ${pName} ${gcState === "FAILED" ? "failed" : "cancelled"} at ${state.mc_percent || 0}%: ${state.subtask_name || "Print Job"}`

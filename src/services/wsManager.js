@@ -468,6 +468,18 @@ class WsManager {
 
   _getDemandedPrinters(userId) {
     const demanded = new Set();
+
+    // Always stream cameras for printers that are currently printing
+    try {
+      const mqttService = require("./mqttPrinterService");
+      const states = mqttService.getAllPrinterStates(userId);
+      for (const [devId, state] of Object.entries(states)) {
+        if (state.gcode_state === "RUNNING" || state.gcode_state === "PAUSE" || state.gcode_state === "PREPARE") {
+          demanded.add(devId);
+        }
+      }
+    } catch {}
+
     // App clients
     const clients = this.appClients.get(userId);
     if (clients) {
