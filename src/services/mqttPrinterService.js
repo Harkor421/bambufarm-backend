@@ -574,6 +574,7 @@ class MqttPrinterService {
       if (gcodeState === "PAUSE" && effectivePrev === "RUNNING") {
         // Build pause reason from HMS alerts
         const hmsAlerts = Array.isArray(state.hms) ? state.hms : [];
+        log.info(`[MQTT] Pause HMS for ${devId}: ${hmsAlerts.length} alerts — ${JSON.stringify(hmsAlerts).slice(0, 200)}`);
         let pauseBody = "";
         if (hmsAlerts.length > 0) {
           const reasons = hmsAlerts.map((h) => {

@@ -16,7 +16,7 @@ const { sendPush } = require("./pushSender");
 const User = require("../db/models/User");
 const PrintAnalysis = require("../db/models/PrintAnalysis");
 
-const VISION_MODEL = "claude-sonnet-4-5-20251001";
+const VISION_MODEL = "claude-sonnet-4-6-20250715";
 const DEFAULT_INTERVAL = 120000; // 2 minutes
 const NOTIFY_COOLDOWN = 900000; // 15 minutes
 const REQUIRED_CONSECUTIVE = 2; // consecutive failures before notifying
@@ -101,7 +101,10 @@ class PrintVisionService {
 
     // Get all printer states for the target user
     const states = mqttService.getAllPrinterStates(targetUid);
-    if (!states || Object.keys(states).length === 0) return;
+    const count = Object.keys(states).length;
+    const running = Object.values(states).filter(s => s.gcode_state === "RUNNING").length;
+    log.info(`[VISION] Checking uid=${targetUid}: ${count} printers, ${running} running`);
+    if (!states || count === 0) return;
 
     for (const [devId, state] of Object.entries(states)) {
       if (state.gcode_state !== "RUNNING") continue;
