@@ -47,7 +47,7 @@ Rules:
 - "ok" = print looks normal for its current stage
 - "warning" = minor issue that may self-resolve (e.g. light stringing)
 - "failure" = critical issue requiring user attention
-- Be conservative — only report "failure" if you are >80% confident
+- Be conservative — only report "failure" if you are >60% confident
 - Early layers will have very little visible print — this is normal, report "ok"
 - confidence is 0-100
 - issues is an array of strings from the list above (lowercase)`;
@@ -242,7 +242,7 @@ class PrintVisionService {
   }
 
   async _handleResult(bambuUid, devId, result, mqttState) {
-    if (result.verdict === "failure" && result.confidence >= 80) {
+    if (result.verdict === "failure" && result.confidence >= 60) {
       const count = (this.consecutiveFailures.get(devId) || 0) + 1;
       this.consecutiveFailures.set(devId, count);
 
