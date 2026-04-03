@@ -432,13 +432,14 @@ class MqttPrinterService {
               const gcState = state.gcode_state;
               const pName = printerNames[devId] || devId;
               if (bambuUid === "1789751384" &&
-                  (gcState === "FINISH" || gcState === "IDLE") &&
-                  (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE")) {
+                  (gcState === "FINISH" || gcState === "IDLE" || gcState === "FAILED") &&
+                  (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE" || prevGcodeState === "PREPARE")) {
                 try {
                   const frame = wsManager.getLatestFrame(bambuUid, devId);
-                  const wasCancelled = (state.mc_percent || 0) < 90;
+                  log.info(`[MQTT] Tecnoprints frame for ${devId}: ${frame ? frame.length + " bytes" : "no frame (bridge offline?)"}`);
+                  const wasCancelled = gcState === "FAILED" || (state.mc_percent || 0) < 90;
                   const msg = wasCancelled
-                    ? `🚫 ${pName} cancelled at ${state.mc_percent || 0}%`
+                    ? `🚫 ${pName} ${gcState === "FAILED" ? "failed" : "cancelled"} at ${state.mc_percent || 0}%: ${state.subtask_name || "Print Job"}`
                     : `✅ ${pName} finished printing: ${state.subtask_name || "Print Job"}`;
                   const FormData = require("form-data");
                   const form = new FormData();
