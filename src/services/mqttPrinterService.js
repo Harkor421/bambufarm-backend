@@ -348,42 +348,45 @@ class MqttPrinterService {
         if (conn.bambuUid) connectedBambuUids.set(conn.bambuUid, userId);
       }
 
+      let userIndex = 0;
       for (const user of users) {
         const id = String(user._id);
         if (this.connections.has(id)) {
           const existing = this.connections.get(id);
           if (existing.connected && existing.socket && !existing.socket.destroyed) {
-            // already connected, skip
             continue;
           }
-          // Connection is dead — clean up and reconnect
           log.info(`[MQTT] User ${id} connection is dead, reconnecting...`);
           existing.stop();
           this.connections.delete(id);
         }
 
-        try {
-          // Ensure fresh token
-          // refresh token
-          const accessToken = await ensureFreshToken(user);
-          // token OK, fetch profile
+        // Stagger API calls to avoid Bambu 429 rate limits
+        if (userIndex > 0 && userIndex % 10 === 0) {
+          await new Promise(r => setTimeout(r, 2000));
+        }
+        userIndex++;
 
-          // Get Bambu UID
-          const profile = await axios.get(`${BAMBU_API}/v1/user-service/my/profile`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-            timeout: 10000,
-          });
-          const bambuUid = String(profile.data.uid);
+        try {
+          const accessToken = await ensureFreshToken(user);
+
+          // Skip if we already have the bambu_uid cached in DB
+          let bambuUid = user.bambu_uid ? String(user.bambu_uid) : null;
+          if (!bambuUid) {
+            const profile = await axios.get(`${BAMBU_API}/v1/user-service/my/profile`, {
+              headers: { Authorization: `Bearer ${accessToken}` },
+              timeout: 10000,
+            });
+            bambuUid = String(profile.data.uid);
+          }
           log.debug(`[MQTT] User ${id} uid=${bambuUid}`);
 
-          // Skip if another user record with the same Bambu UID is already connected
           if (connectedBambuUids.has(bambuUid)) {
             log.debug(`[MQTT] User ${id} uid=${bambuUid} already connected via user ${connectedBambuUids.get(bambuUid)}, skipping duplicate`);
             continue;
           }
           connectedBambuUids.set(bambuUid, id);
 
-          // Get printer list
           const printers = await axios.get(`${BAMBU_API}/v1/iot-service/api/user/bind`, {
             headers: { Authorization: `Bearer ${accessToken}` },
             timeout: 10000,
@@ -431,45 +434,49 @@ class MqttPrinterService {
                 await this._handleStateChange(u, devId, state, prevGcodeState, skipPushToStart, printerNames);
               }
 
-              // Send camera frame to Tecnoprints WhatsApp on print finish (once)
-              const gcState = state.gcode_state;
-              const pName = printerNames[devId] || devId;
-              if (bambuUid === "1789751384" &&
-                  (gcState === "FINISH" || gcState === "IDLE" || gcState === "FAILED") &&
-                  (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE" || prevGcodeState === "PREPARE")) {
-                // Small delay to ensure last camera frames are cached
-                await new Promise(r => setTimeout(r, 2000));
-                try {
-                  // Try in-memory frame first, then fetch via HTTP
-                  let frame = wsManager.getLatestFrame(bambuUid, devId);
-                  if (!frame || frame.length < 100) {
-                    try {
-                      const axios = require("axios");
-                      const r = await axios.get(`https://bambufarm-api-production.up.railway.app/api/printer/frame/${bambuUid}/${devId}`, {
-                        responseType: "arraybuffer", timeout: 5000,
-                        headers: { "X-API-Key": process.env.API_KEY },
-                      });
-                      if (r.status === 200 && r.data?.length > 100) frame = Buffer.from(r.data);
-                    } catch {}
+              // Send camera frame + status to Tecnoprints WhatsApp on ALL state changes
+              if (bambuUid === "1789751384") {
+                const gcState = state.gcode_state;
+                const pName = printerNames[devId] || devId;
+                const jobName = state.subtask_name || "Print Job";
+                const pct = state.mc_percent || 0;
+
+                // Build message based on state transition
+                let msg = null;
+                if (gcState === "RUNNING" && (prevGcodeState === "IDLE" || prevGcodeState === "FINISH" || prevGcodeState === "FAILED" || prevGcodeState === "PREPARE")) {
+                  msg = `🖨 ${pName} started printing: ${jobName}`;
+                } else if (gcState === "PAUSE" && prevGcodeState === "RUNNING") {
+                  msg = `⏸ ${pName} paused at ${pct}%: ${jobName}`;
+                } else if (gcState === "RUNNING" && prevGcodeState === "PAUSE") {
+                  msg = `▶️ ${pName} resumed at ${pct}%: ${jobName}`;
+                } else if ((gcState === "FINISH" || gcState === "IDLE") && (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE" || prevGcodeState === "PREPARE")) {
+                  const wasCancelled = pct < 90;
+                  msg = wasCancelled
+                    ? `🚫 ${pName} cancelled at ${pct}%: ${jobName}`
+                    : `✅ ${pName} finished: ${jobName}`;
+                } else if (gcState === "FAILED") {
+                  msg = `⚠️ ${pName} failed at ${pct}%: ${jobName}`;
+                }
+
+                if (msg) {
+                  // Small delay to ensure camera frames are cached
+                  await new Promise(r => setTimeout(r, 2000));
+                  try {
+                    const wsm = require("./wsManager");
+                    const frame = wsm.getLatestFrame(bambuUid, devId);
+                    const FormData = require("form-data");
+                    const form = new FormData();
+                    form.append("message", msg);
+                    if (frame && frame.length > 100) {
+                      form.append("media", frame, { filename: `${devId}.jpg`, contentType: "image/jpeg" });
+                    }
+                    await require("axios").post("https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints", form, {
+                      headers: form.getHeaders(), timeout: 10000,
+                    });
+                    log.info(`[MQTT] Tecnoprints broadcast: ${msg.slice(0, 60)} (${frame ? frame.length : 0} bytes)`);
+                  } catch (e) {
+                    log.warn(`[MQTT] Tecnoprints broadcast failed: ${e.message}`);
                   }
-                  log.info(`[MQTT] Tecnoprints frame for ${devId}: ${frame ? frame.length + " bytes" : "no frame"}`);
-                  const wasCancelled = gcState === "FAILED" || (state.mc_percent || 0) < 90;
-                  const msg = wasCancelled
-                    ? `🚫 ${pName} ${gcState === "FAILED" ? "failed" : "cancelled"} at ${state.mc_percent || 0}%: ${state.subtask_name || "Print Job"}`
-                    : `✅ ${pName} finished printing: ${state.subtask_name || "Print Job"}`;
-                  const FormData = require("form-data");
-                  const form = new FormData();
-                  form.append("message", msg);
-                  if (frame && frame.length > 100) {
-                    form.append("media", frame, { filename: `${devId}.jpg`, contentType: "image/jpeg" });
-                  }
-                  const axios = require("axios");
-                  await axios.post("https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints", form, {
-                    headers: form.getHeaders(), timeout: 10000,
-                  });
-                  log.info(`[MQTT] Tecnoprints finish broadcast for ${pName}`);
-                } catch (e) {
-                  log.warn(`[MQTT] Tecnoprints broadcast failed: ${e.message}`);
                 }
               }
             },
@@ -512,7 +519,13 @@ class MqttPrinterService {
           this.connections.set(id, conn);
           conn.connect();
         } catch (err) {
-          log.error(`[MQTT] Failed to set up user ${id}: ${err.message}`);
+          if (err.response?.status === 429) {
+            // Rate limited — wait and continue with remaining users
+            log.warn(`[MQTT] Rate limited setting up user ${id}, waiting 10s...`);
+            await new Promise(r => setTimeout(r, 10000));
+          } else {
+            log.error(`[MQTT] Failed to set up user ${id}: ${err.message}`);
+          }
         }
       }
     } catch (err) {
