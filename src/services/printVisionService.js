@@ -17,7 +17,7 @@ const User = require("../db/models/User");
 const PrintAnalysis = require("../db/models/PrintAnalysis");
 
 const VISION_MODEL = "claude-haiku-4-5-20251001";
-const DEFAULT_INTERVAL = 120000; // 2 minutes
+const DEFAULT_INTERVAL = 300000; // 5 minutes
 const NOTIFY_COOLDOWN = 900000; // 15 minutes
 const REQUIRED_CONSECUTIVE = 2; // consecutive failures before notifying
 const MIN_LAYER = 5;
@@ -257,8 +257,35 @@ class PrintVisionService {
       }
 
       log.info(`[VISION] Notified ${sentTokens.size} user(s) for ${devId}: ${issueList}`);
+
+      // Send camera frame + alert to Tecnoprints broadcast
+      this._broadcastWithImage(bambuUid, devId, result, mqttState).catch(() => {});
     } catch (e) {
       log.error(`[VISION] Notify error: ${e.message}`);
+    }
+  }
+
+  async _broadcastWithImage(bambuUid, devId, result, mqttState) {
+    try {
+      const frame = wsManager.getLatestFrame(bambuUid, devId);
+      const issueList = result.issues?.join(", ") || "print issue";
+      const message = `🚨 ${devId} — ${issueList}: ${result.detail || "Check print"}`;
+
+      const FormData = require("form-data");
+      const form = new FormData();
+      form.append("message", message);
+      if (frame && frame.length > 100) {
+        form.append("media", frame, { filename: `${devId}.jpg`, contentType: "image/jpeg" });
+      }
+
+      await axios.post(
+        "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints",
+        form,
+        { headers: form.getHeaders(), timeout: 10000 }
+      );
+      log.info(`[VISION] Tecnoprints broadcast sent for ${devId} (${frame ? frame.length : 0} bytes)`);
+    } catch (e) {
+      log.warn(`[VISION] Tecnoprints broadcast failed: ${e.message}`);
     }
   }
 }
