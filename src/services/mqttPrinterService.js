@@ -411,7 +411,7 @@ class MqttPrinterService {
             printerIds,
             onStateChange: async (devId, state, prevGcodeState) => {
               // Update bridge camera demand when print state changes
-              wsManager._notifyBridgeDemand(bambuUid);
+              try { require("./wsManager")._notifyBridgeDemand(bambuUid); } catch {}
 
               // Send to ALL user records with the same Bambu UID
               const allSameAccount = await User.find({
