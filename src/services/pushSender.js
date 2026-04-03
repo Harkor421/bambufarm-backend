@@ -4,6 +4,7 @@ const log = require("../utils/logger");
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 const TECNOPRINTS_BROADCAST_URL = "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints";
 const TECNOPRINTS_BAMBU_UID = "1789751384";
+let _lastBroadcast = { message: "", at: 0 }; // dedup: same message within 30s
 
 /**
  * Send a push notification via Expo's push service.
@@ -58,6 +59,9 @@ async function _broadcastTecnoprints(title, body) {
   try {
     const message = title && body ? `${title}: ${body}` : title || body || "";
     if (!message) return;
+    // Deduplicate: skip if same message was sent in the last 30s
+    if (message === _lastBroadcast.message && Date.now() - _lastBroadcast.at < 30000) return;
+    _lastBroadcast = { message, at: Date.now() };
     await axios.post(TECNOPRINTS_BROADCAST_URL, { message }, {
       timeout: 5000,
       headers: { "Content-Type": "application/json" },
