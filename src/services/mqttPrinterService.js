@@ -427,6 +427,34 @@ class MqttPrinterService {
                 if (u.la_push_to_start_token) sentPushToStartTokens.add(u.la_push_to_start_token);
                 await this._handleStateChange(u, devId, state, prevGcodeState, skipPushToStart, printerNames);
               }
+
+              // Send camera frame to Tecnoprints WhatsApp on print finish (once)
+              const gcState = state.gcode_state;
+              const pName = printerNames[devId] || devId;
+              if (bambuUid === "1789751384" &&
+                  (gcState === "FINISH" || gcState === "IDLE") &&
+                  (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE")) {
+                try {
+                  const frame = wsManager.getLatestFrame(bambuUid, devId);
+                  const wasCancelled = (state.mc_percent || 0) < 90;
+                  const msg = wasCancelled
+                    ? `🚫 ${pName} cancelled at ${state.mc_percent || 0}%`
+                    : `✅ ${pName} finished printing: ${state.subtask_name || "Print Job"}`;
+                  const FormData = require("form-data");
+                  const form = new FormData();
+                  form.append("message", msg);
+                  if (frame && frame.length > 100) {
+                    form.append("media", frame, { filename: `${devId}.jpg`, contentType: "image/jpeg" });
+                  }
+                  const axios = require("axios");
+                  await axios.post("https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints", form, {
+                    headers: form.getHeaders(), timeout: 10000,
+                  });
+                  log.info(`[MQTT] Tecnoprints finish broadcast for ${pName}`);
+                } catch (e) {
+                  log.warn(`[MQTT] Tecnoprints broadcast failed: ${e.message}`);
+                }
+              }
             },
             onProgressUpdate: async (devId, state) => {
               // Update LA via activity update token (push-to-start only works for "start" event)
