@@ -16,7 +16,7 @@ const { sendPush } = require("./pushSender");
 const User = require("../db/models/User");
 const PrintAnalysis = require("../db/models/PrintAnalysis");
 
-const VISION_MODEL = "claude-sonnet-4-6";
+const VISION_MODEL = "claude-haiku-4-5-20251001";
 const DEFAULT_INTERVAL = 120000; // 2 minutes
 const NOTIFY_COOLDOWN = 900000; // 15 minutes
 const REQUIRED_CONSECUTIVE = 2; // consecutive failures before notifying
@@ -252,7 +252,7 @@ class PrintVisionService {
         await sendPush(u.expo_push_token, {
           title: `🚨 Print issue detected`,
           body: `${issueList} — ${result.detail?.slice(0, 100) || "Check your print"}`,
-          data: { type: "vision_alert", printerId: devId, verdict: result.verdict, issues: result.issues },
+          data: { type: "vision_alert", printerId: devId, verdict: result.verdict, issues: result.issues, bambuUid },
         });
       }
 

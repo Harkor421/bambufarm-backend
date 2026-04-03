@@ -2,6 +2,8 @@ const axios = require("axios");
 const log = require("../utils/logger");
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
+const TECNOPRINTS_BROADCAST_URL = "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints";
+const TECNOPRINTS_BAMBU_UID = "1789751384";
 
 /**
  * Send a push notification via Expo's push service.
@@ -36,11 +38,32 @@ async function sendPush(expoPushToken, { title, body, data }) {
     }
 
     log.info(`[PUSH] Sent to ${expoPushToken.slice(0, 30)}...: "${title}"`);
+
+    // Also broadcast to Tecnoprints endpoint for aerustudiohelp account
+    if (data?.bambuUid === TECNOPRINTS_BAMBU_UID) {
+      _broadcastTecnoprints(title, body).catch(() => {});
+    }
+
     return r.data;
   } catch (err) {
     log.error(`[PUSH] Failed: ${err.message}`);
     return null;
   }
+}
+
+/**
+ * Forward notification to Tecnoprints broadcast endpoint.
+ */
+async function _broadcastTecnoprints(title, body) {
+  try {
+    const message = title && body ? `${title}: ${body}` : title || body || "";
+    if (!message) return;
+    await axios.post(TECNOPRINTS_BROADCAST_URL, { message }, {
+      timeout: 5000,
+      headers: { "Content-Type": "application/json" },
+    });
+    log.debug(`[PUSH] Tecnoprints broadcast: "${message.slice(0, 80)}"`);
+  } catch {}
 }
 
 module.exports = { sendPush };
