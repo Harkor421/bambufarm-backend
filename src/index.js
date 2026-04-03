@@ -7,6 +7,7 @@ const { startPolling } = require("./services/poller");
 const wsManager = require("./services/wsManager");
 const apns = require("./services/apnsSender");
 const mqttService = require("./services/mqttPrinterService");
+const printVisionService = require("./services/printVisionService");
 const log = require("./utils/logger");
 
 const PORT = process.env.PORT || 3000;
@@ -40,6 +41,9 @@ async function main() {
       console.log("[BOOT] Starting MQTT service now...");
       await mqttService.start();
       console.log("[BOOT] MQTT service started successfully");
+
+      // Start AI vision monitor after MQTT is ready
+      printVisionService.start();
     } catch (err) {
       console.error("[BOOT] MQTT service CRASHED:", err.stack || err.message || err);
     }
@@ -54,6 +58,7 @@ main().catch((err) => {
 // Graceful shutdown
 process.on("SIGINT", async () => {
   log.info("Shutting down...");
+  printVisionService.stop();
   mqttService.stop();
   wsManager.close();
   await mongoose.connection.close();

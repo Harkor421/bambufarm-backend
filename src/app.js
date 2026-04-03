@@ -9,6 +9,7 @@ const registerRoutes = require("./routes/register");
 const bridgeRoutes = require("./routes/bridge");
 const printerControlRoutes = require("./routes/printerControl");
 const publicCameraRoutes = require("./routes/publicCamera");
+const printVisionRoutes = require("./routes/printVision");
 
 const app = express();
 
@@ -77,6 +78,7 @@ app.use("/api", registerRoutes);
 app.use("/api", bridgeRoutes);
 app.use("/api", printerControlRoutes);
 app.use("/api", publicCameraRoutes);
+app.use("/api", printVisionRoutes);
 
 // Global error handler
 app.use((err, _req, res, _next) => {
