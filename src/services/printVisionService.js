@@ -16,7 +16,7 @@ const { sendPush } = require("./pushSender");
 const User = require("../db/models/User");
 const PrintAnalysis = require("../db/models/PrintAnalysis");
 
-const VISION_MODEL = "claude-sonnet-4-6-20250715";
+const VISION_MODEL = "claude-sonnet-4-6";
 const DEFAULT_INTERVAL = 120000; // 2 minutes
 const NOTIFY_COOLDOWN = 900000; // 15 minutes
 const REQUIRED_CONSECUTIVE = 2; // consecutive failures before notifying
