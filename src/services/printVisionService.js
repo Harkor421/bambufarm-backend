@@ -17,7 +17,7 @@ const User = require("../db/models/User");
 const PrintAnalysis = require("../db/models/PrintAnalysis");
 
 const VISION_MODEL = "claude-haiku-4-5-20251001";
-const DEFAULT_INTERVAL = 300000; // 5 minutes
+const DEFAULT_INTERVAL = 60000; // check every 60s, but only call API at percentage milestones
 const NOTIFY_COOLDOWN = 900000; // 15 minutes
 const REQUIRED_CONSECUTIVE = 2; // consecutive failures before notifying
 const MIN_LAYER = 5;
@@ -52,12 +52,18 @@ Rules:
 - confidence is 0-100
 - issues is an array of strings from the list above (lowercase)`;
 
+const PERCENT_STEP = 5; // analyze every 5% progress (long prints)
+const MIN_ANALYSIS_GAP = 180000; // minimum 3 min between API calls (prevents spam on short prints)
+const MAX_ANALYSIS_GAP = 600000; // maximum 10 min between API calls (ensures coverage on long prints)
+
 class PrintVisionService {
   constructor() {
     this.interval = null;
     this.anthropic = null;
     this.consecutiveFailures = new Map(); // printerId → count
     this.lastNotifiedAt = new Map(); // printerId → timestamp
+    this.lastAnalyzedPct = new Map(); // printerId → last analyzed percent (rounded to PERCENT_STEP)
+    this.lastAnalyzedAt = new Map(); // printerId → timestamp of last API call
     this.running = false;
   }
 
@@ -107,15 +113,35 @@ class PrintVisionService {
     if (!states || count === 0) return;
 
     for (const [devId, state] of Object.entries(states)) {
-      if (state.gcode_state !== "RUNNING") continue;
+      if (state.gcode_state !== "RUNNING") {
+        // Reset tracked percent when print stops
+        this.lastAnalyzedPct.delete(devId);
+        continue;
+      }
 
       // Skip early layers
       const layerNum = state.layer_num ?? 0;
       const percent = state.mc_percent ?? 0;
-      if (layerNum < MIN_LAYER && percent < MIN_PERCENT) {
-        log.debug(`[VISION] Skipping ${devId} — layer ${layerNum}, ${percent}%`);
-        continue;
-      }
+      if (layerNum < MIN_LAYER && percent < MIN_PERCENT) continue;
+
+      // Hybrid trigger: percentage milestones + time bounds
+      // - Analyze at every 5% milestone
+      // - But never more often than every 3 min (short prints)
+      // - And at least every 10 min even if % hasn't moved (long prints)
+      const milestone = Math.floor(percent / PERCENT_STEP) * PERCENT_STEP;
+      const lastPct = this.lastAnalyzedPct.get(devId) ?? -1;
+      const lastTime = this.lastAnalyzedAt.get(devId) || 0;
+      const elapsed = Date.now() - lastTime;
+
+      const pctTrigger = milestone > lastPct;
+      const maxTimeTrigger = elapsed >= MAX_ANALYSIS_GAP;
+      const minTimeSafe = elapsed >= MIN_ANALYSIS_GAP;
+
+      if (!((pctTrigger && minTimeSafe) || maxTimeTrigger)) continue;
+
+      this.lastAnalyzedPct.set(devId, milestone);
+      this.lastAnalyzedAt.set(devId, Date.now());
+      log.info(`[VISION] Analyzing ${devId} at ${percent}% (milestone ${milestone}%, ${pctTrigger ? "pct" : "time"} trigger)`);
 
       try {
         await this._analyzePrinter(targetUid, devId, state);
