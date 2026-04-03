@@ -65,4 +65,48 @@ router.get("/vision/status", async (req, res) => {
   }
 });
 
+// POST /api/vision/test-broadcast — test sending a camera snapshot to Tecnoprints
+// Body: { printerId, uid?, message? }
+router.post("/vision/test-broadcast", async (req, res) => {
+  try {
+    const { printerId, uid, message } = req.body;
+    if (!printerId) return res.status(400).json({ ok: false, error: "Missing printerId" });
+
+    const bambuUid = uid || process.env.VISION_TARGET_UID || "1789751384";
+    const wsManager = require("../services/wsManager");
+    const axios = require("axios");
+
+    // Get frame
+    const frame = wsManager.getLatestFrame(bambuUid, printerId);
+    const frameInfo = frame ? `${frame.length} bytes` : "NO FRAME";
+    log.info(`[VISION-TEST] Frame for ${printerId} (uid=${bambuUid}): ${frameInfo}`);
+
+    const msg = message || `🧪 Test broadcast for ${printerId} — frame: ${frameInfo}`;
+
+    const FormData = require("form-data");
+    const form = new FormData();
+    form.append("message", msg);
+    if (frame && frame.length > 100) {
+      form.append("media", frame, { filename: `${printerId}.jpg`, contentType: "image/jpeg" });
+    }
+
+    const r = await axios.post(
+      "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints",
+      form,
+      { headers: form.getHeaders(), timeout: 10000 }
+    );
+
+    res.json({
+      ok: true,
+      frameBytes: frame?.length || 0,
+      hasFrame: !!(frame && frame.length > 100),
+      broadcastStatus: r.status,
+      message: msg,
+    });
+  } catch (err) {
+    log.error(`[VISION-TEST] Error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;
