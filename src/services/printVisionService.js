@@ -9,9 +9,8 @@
  */
 
 const Anthropic = require("@anthropic-ai/sdk").default;
+const axios = require("axios");
 const log = require("../utils/logger");
-const wsManager = require("./wsManager");
-const mqttService = require("./mqttPrinterService");
 const { sendPush } = require("./pushSender");
 const User = require("../db/models/User");
 const PrintAnalysis = require("../db/models/PrintAnalysis");
@@ -106,7 +105,7 @@ class PrintVisionService {
     if (!targetUid) return;
 
     // Get all printer states for the target user
-    const states = mqttService.getAllPrinterStates(targetUid);
+    const states = require("./mqttPrinterService").getAllPrinterStates(targetUid);
     const count = Object.keys(states).length;
     const running = Object.values(states).filter(s => s.gcode_state === "RUNNING").length;
     log.info(`[VISION] Checking uid=${targetUid}: ${count} printers, ${running} running`);
@@ -153,7 +152,7 @@ class PrintVisionService {
 
   async _analyzePrinter(bambuUid, devId, mqttState) {
     // Get latest camera frame
-    const frame = wsManager.getLatestFrame(bambuUid, devId);
+    const frame = require("./wsManager").getLatestFrame(bambuUid, devId);
     if (!frame || frame.length < 100) {
       log.debug(`[VISION] No frame for ${devId}, skipping`);
       return;
@@ -285,7 +284,9 @@ class PrintVisionService {
       log.info(`[VISION] Notified ${sentTokens.size} user(s) for ${devId}: ${issueList}`);
 
       // Send camera frame + alert to Tecnoprints broadcast
-      this._broadcastWithImage(bambuUid, devId, result, mqttState).catch(() => {});
+      this._broadcastWithImage(bambuUid, devId, result, mqttState).catch((e) => {
+        log.error(`[VISION] Broadcast error: ${e.message}`);
+      });
     } catch (e) {
       log.error(`[VISION] Notify error: ${e.message}`);
     }
@@ -293,7 +294,7 @@ class PrintVisionService {
 
   async _broadcastWithImage(bambuUid, devId, result, mqttState) {
     try {
-      const frame = wsManager.getLatestFrame(bambuUid, devId);
+      const frame = require("./wsManager").getLatestFrame(bambuUid, devId);
       const issueList = result.issues?.join(", ") || "print issue";
       const message = `🚨 ${devId} — ${issueList}: ${result.detail || "Check print"}`;
 
