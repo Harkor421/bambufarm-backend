@@ -25,8 +25,9 @@ router.get("/vision/history/:printerId", async (req, res) => {
 // GET /api/vision/status — current monitoring status
 router.get("/vision/status", async (req, res) => {
   try {
-    const enabled = process.env.VISION_ENABLED === "true";
-    const targetUid = process.env.VISION_TARGET_UID || null;
+    const cfg = require("../config");
+    const enabled = cfg.vision.enabled;
+    const targetUid = cfg.vision.targetUid || null;
 
     // Get latest analysis per printer (last 10 minutes)
     const recent = await PrintAnalysis.find({
@@ -72,35 +73,22 @@ router.post("/vision/test-broadcast", async (req, res) => {
     const { printerId, uid, message } = req.body;
     if (!printerId) return res.status(400).json({ ok: false, error: "Missing printerId" });
 
-    const bambuUid = uid || process.env.VISION_TARGET_UID || "1789751384";
+    const cfg = require("../config");
+    const bambuUid = uid || cfg.vision.targetUid || cfg.tecnoprints.bambuUid;
     const wsManager = require("../services/wsManager");
-    const axios = require("axios");
+    const { broadcastWithImage } = require("../services/tecnoprintsBroadcast");
 
-    // Get frame
     const frame = wsManager.getLatestFrame(bambuUid, printerId);
     const frameInfo = frame ? `${frame.length} bytes` : "NO FRAME";
     log.info(`[VISION-TEST] Frame for ${printerId} (uid=${bambuUid}): ${frameInfo}`);
 
     const msg = message || `🧪 Test broadcast for ${printerId} — frame: ${frameInfo}`;
-
-    const FormData = require("form-data");
-    const form = new FormData();
-    form.append("message", msg);
-    if (frame && frame.length > 100) {
-      form.append("media", frame, { filename: `${printerId}.jpg`, contentType: "image/jpeg" });
-    }
-
-    const r = await axios.post(
-      "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints",
-      form,
-      { headers: form.getHeaders(), timeout: 10000 }
-    );
+    await broadcastWithImage(msg, frame);
 
     res.json({
       ok: true,
       frameBytes: frame?.length || 0,
       hasFrame: !!(frame && frame.length > 100),
-      broadcastStatus: r.status,
       message: msg,
     });
   } catch (err) {

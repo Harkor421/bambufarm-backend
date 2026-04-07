@@ -10,7 +10,8 @@ const mqttService = require("./services/mqttPrinterService");
 const printVisionService = require("./services/printVisionService");
 const log = require("./utils/logger");
 
-const PORT = process.env.PORT || 3000;
+const config = require("./config");
+const PORT = config.port;
 
 async function main() {
   // Connect to MongoDB
@@ -33,6 +34,10 @@ async function main() {
   // Lightweight poller — token refresh + printer discovery only (MQTT handles everything else)
   const interval = Number(process.env.POLL_INTERVAL_MS) || 1800000; // 30 min
   startPolling(interval);
+
+  // Wire up cross-service dependencies (breaks circular deps)
+  wsManager.setPrinterStateGetter((uid) => mqttService.getAllPrinterStates(uid));
+  mqttService._getFrame = (uid, devId) => wsManager.getLatestFrame(uid, devId);
 
   // Start MQTT service for real-time printer state + control
   console.log("[BOOT] Scheduling MQTT service start in 5s...");

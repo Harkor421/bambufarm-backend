@@ -1,6 +1,6 @@
 const log = require("../utils/logger");
 
-const API_KEY = process.env.API_KEY;
+const { apiKey: API_KEY } = require("../config");
 
 function requireApiKey(req, res, next) {
   if (req.path === "/api/health") return next();

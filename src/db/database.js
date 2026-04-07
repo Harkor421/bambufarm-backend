@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const log = require("../utils/logger");
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/bambufarm";
+const { mongoUri: MONGO_URI } = require("../config");
 
 async function connectDB() {
   try {

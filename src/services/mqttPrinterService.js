@@ -17,15 +17,15 @@ const User = require("../db/models/User");
 const PrinterState = require("../db/models/PrinterState");
 const { sendPush } = require("./pushSender");
 const apns = require("./apnsSender");
-const { getActivityToken, clearActivityToken, clearPushToStartToken, isTokenInvalid } = require("./apnsTokenUtils");
+const { getActivityToken, clearActivityToken, isTokenInvalid } = require("./apnsTokenUtils");
 const { ensureFreshToken } = require("./tokenRefresh");
-const { lookupHmsError, formatHmsCode } = require("../utils/hmsErrors");
 
-const BAMBU_API = "https://api.bambulab.com";
-const MQTT_HOST = "us.mqtt.bambulab.com";
-const MQTT_PORT = 8883;
-const PUSHALL_INTERVAL = 60000;
-const RECONNECT_DELAY = 10000;
+const config = require("../config");
+const BAMBU_API = config.bambu.apiBase;
+const MQTT_HOST = config.bambu.mqttHost;
+const MQTT_PORT = config.bambu.mqttPort;
+const PUSHALL_INTERVAL = config.bambu.pushallInterval;
+const RECONNECT_DELAY = config.bambu.reconnectDelay;
 
 // ── Per-user MQTT connection ───────────────────────────
 
@@ -433,8 +433,8 @@ class MqttPrinterService {
             accessToken,
             printerIds,
             onStateChange: async (devId, state, prevGcodeState) => {
-              // Update bridge camera demand when print state changes
-              try { require("./wsManager")._notifyBridgeDemand(bambuUid); } catch {}
+              // Notify other services of state change (bridge demand, etc.)
+              require("./eventBus").emit("printer:stateChange", { bambuUid, devId, state });
 
               // Send to ALL user records with the same Bambu UID
               const allSameAccount = await User.find({
@@ -455,13 +455,13 @@ class MqttPrinterService {
               }
 
               // Send camera frame + status to Tecnoprints WhatsApp on ALL state changes
-              if (bambuUid === "1789751384") {
+              const { isTecnoprintsAccount, broadcastWithImage } = require("./tecnoprintsBroadcast");
+              if (isTecnoprintsAccount(bambuUid)) {
                 const gcState = state.gcode_state;
                 const pName = printerNames[devId] || devId;
                 const jobName = state.subtask_name || "Print Job";
                 const pct = state.mc_percent || 0;
 
-                // Build message based on state transition
                 let msg = null;
                 if (gcState === "RUNNING" && (prevGcodeState === "IDLE" || prevGcodeState === "FINISH" || prevGcodeState === "FAILED" || prevGcodeState === "PREPARE")) {
                   msg = `🖨 ${pName} started printing: ${jobName}`;
@@ -470,33 +470,16 @@ class MqttPrinterService {
                 } else if (gcState === "RUNNING" && prevGcodeState === "PAUSE") {
                   msg = `▶️ ${pName} resumed at ${pct}%: ${jobName}`;
                 } else if ((gcState === "FINISH" || gcState === "IDLE") && (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE" || prevGcodeState === "PREPARE")) {
-                  const wasCancelled = pct < 90;
-                  msg = wasCancelled
-                    ? `🚫 ${pName} cancelled at ${pct}%: ${jobName}`
-                    : `✅ ${pName} finished: ${jobName}`;
+                  msg = (pct < 90) ? `🚫 ${pName} cancelled at ${pct}%: ${jobName}` : `✅ ${pName} finished: ${jobName}`;
                 } else if (gcState === "FAILED") {
                   msg = `⚠️ ${pName} failed at ${pct}%: ${jobName}`;
                 }
 
                 if (msg) {
-                  // Small delay to ensure camera frames are cached
                   await new Promise(r => setTimeout(r, 2000));
-                  try {
-                    const wsm = require("./wsManager");
-                    const frame = wsm.getLatestFrame(bambuUid, devId);
-                    const FormData = require("form-data");
-                    const form = new FormData();
-                    form.append("message", msg);
-                    if (frame && frame.length > 100) {
-                      form.append("media", frame, { filename: `${devId}.jpg`, contentType: "image/jpeg" });
-                    }
-                    await require("axios").post("https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints", form, {
-                      headers: form.getHeaders(), timeout: 10000,
-                    });
-                    log.info(`[MQTT] Tecnoprints broadcast: ${msg.slice(0, 60)} (${frame ? frame.length : 0} bytes)`);
-                  } catch (e) {
-                    log.warn(`[MQTT] Tecnoprints broadcast failed: ${e.message}`);
-                  }
+                  // Get frame via getter (avoids circular dep with wsManager)
+                  const frame = mqttService._getFrame?.(bambuUid, devId) || null;
+                  broadcastWithImage(msg, frame).catch(() => {});
                 }
               }
             },
@@ -650,163 +633,32 @@ class MqttPrinterService {
     }
 
     if (effectivePrev && gcodeState !== effectivePrev) {
-      let notification = null;
+      const { buildNotification } = require("./notificationBuilder");
+      const { dispatchLiveActivity } = require("./liveActivityDispatcher");
 
-      if (gcodeState === "PAUSE" && effectivePrev === "RUNNING") {
-        // Build pause reason from HMS alerts
-        const hmsAlerts = Array.isArray(state.hms) ? state.hms : [];
-        log.info(`[MQTT] Pause HMS for ${devId}: ${hmsAlerts.length} alerts — ${JSON.stringify(hmsAlerts).slice(0, 200)}`);
-        let pauseBody = "";
-        if (hmsAlerts.length > 0) {
-          const reasons = hmsAlerts.map((h) => {
-            const desc = lookupHmsError(h.attr, h.code);
-            return desc || formatHmsCode(h.attr, h.code);
-          });
-          pauseBody = reasons.join(" | ");
-        } else {
-          pauseBody = "Paused by user";
-        }
+      let notification = buildNotification(gcodeState, effectivePrev, state, devId, printerName);
 
-        notification = {
-          title: `⏸ ${printerName} paused`,
-          body: pauseBody,
-          data: { type: "print_paused", printerId: devId, printerName, progressPct: state.mc_percent, remainingSec: (state.mc_remaining_time || 0) * 60 },
-        };
-      } else if (gcodeState === "RUNNING" && effectivePrev === "PAUSE") {
-        notification = {
-          title: `▶️ ${printerName} resumed`,
-          body: jobTitle,
-          data: { type: "print_resumed", printerId: devId, printerName, progressPct: state.mc_percent, remainingSec: (state.mc_remaining_time || 0) * 60 },
-        };
-      } else if ((gcodeState === "FINISH" || gcodeState === "IDLE") && (effectivePrev === "RUNNING" || effectivePrev === "PAUSE" || effectivePrev === "PREPARE")) {
-        // Distinguish finished vs cancelled: if progress < 90%, it was likely cancelled
-        const wasCancelled = (state.mc_percent || 0) < 90;
-        notification = {
-          title: wasCancelled ? `🚫 ${printerName} cancelled` : `✅ ${printerName} finished`,
-          body: jobTitle,
-          data: { type: wasCancelled ? "print_error" : "print_finished", printerId: devId, printerName },
-        };
-      } else if (gcodeState === "FAILED" && (effectivePrev === "RUNNING" || effectivePrev === "PAUSE" || effectivePrev === "PREPARE")) {
-        const hmsAlerts = Array.isArray(state.hms) ? state.hms : [];
-        let failBody = state.subtask_name || "Print failed";
-        if (hmsAlerts.length > 0) {
-          const reasons = hmsAlerts.map((h) => lookupHmsError(h.attr, h.code) || formatHmsCode(h.attr, h.code));
-          failBody = reasons.join(" | ");
-        }
-        notification = {
-          title: `⚠️ ${printerName} failed`,
-          body: failBody,
-          data: { type: "print_error", printerId: devId, printerName },
-        };
-      } else if (gcodeState === "RUNNING" && (effectivePrev === "IDLE" || effectivePrev === "FINISH" || effectivePrev === "FAILED" || effectivePrev === "PREPARE")) {
-        // Fetch cover image URL from tasks API for the LA thumbnail
-        let coverUrl = null;
+      // For print_started, also fetch cover URL for LA thumbnail
+      if (notification?.data?.type === "print_started") {
         try {
           const { fetchTasks } = require("./bambuClient");
           const freshToken = await ensureFreshToken(user);
           if (freshToken) {
             const tasks = await fetchTasks(freshToken, 5);
             const task = tasks.find(t => t?.deviceId === devId);
-            if (task?.cover) coverUrl = task.cover;
-            log.info(`[MQTT] Cover for ${devId}: ${coverUrl ? coverUrl.slice(0, 60) + '...' : 'none'}`);
-          } else {
-            log.warn(`[MQTT] Could not refresh token to fetch cover for ${devId}`);
+            if (task?.cover) notification.data.coverUrl = task.cover;
           }
-        } catch (e) {
-          log.warn(`[MQTT] Cover fetch failed for ${devId}: ${e.message}`);
-        }
-
-        notification = {
-          title: `🖨 ${printerName} started printing`,
-          body: jobTitle,
-          data: { type: "print_started", printerId: devId, printerName, progressPct: state.mc_percent, remainingSec: (state.mc_remaining_time || 0) * 60, coverUrl },
-        };
+        } catch {}
       }
 
       if (notification && user.expo_push_token) {
-        // Include bambuUid so NSE can fetch camera frames
         if (notification.data) notification.data.bambuUid = user.bambu_uid || "";
         await sendPush(user.expo_push_token, notification);
-        let apnsSuccess = false;
 
-        // Send Live Activity updates via APNS
-        // START uses push-to-start token; UPDATE/END use activity update token
-        if (apns.isConfigured()) {
-          const nowSec = Math.floor(Date.now() / 1000);
-          const remaining = (state.mc_remaining_time || 0) * 60;
-          const rawProgress = (state.mc_percent || 0) / 100;
-          const progress = (gcodeState === "PREPARE" || (gcodeState === "RUNNING" && effectivePrev === "PREPARE" && rawProgress >= 0.95)) ? 0 : rawProgress;
+        const apnsSuccess = await dispatchLiveActivity(
+          user, devId, notification, state, gcodeState, effectivePrev, printerName, skipPushToStart
+        );
 
-          try {
-            if (notification.data.type === "print_started") {
-              // START: use push-to-start token
-              if (user.la_push_to_start_token && !skipPushToStart) {
-                const contentState = {
-                  jobTitle, progress,
-                  startTime: nowSec,
-                  endTime: remaining > 0 ? nowSec + remaining : nowSec,
-                  status: "printing",
-                };
-                const r = await apns.sendLiveActivityStart(user.la_push_to_start_token, { printerId: devId, printerName }, contentState);
-                if (r?.success) apnsSuccess = true;
-                log.info(`[MQTT-LA] print_started for ${devId}: ${r?.success ? "sent" : "failed"}`);
-              }
-            } else if (notification.data.type === "print_finished" || notification.data.type === "print_error") {
-              // END: use activity update token
-              const actToken = getActivityToken(user, devId);
-              if (actToken) {
-                const isCancelled = notification.data.type === "print_error";
-                const r = await apns.sendLiveActivityEnd(actToken, {
-                  jobTitle: isCancelled ? "Cancelled" : jobTitle,
-                  progress: isCancelled ? progress : 1.0,
-                  startTime: nowSec, endTime: nowSec,
-                  status: isCancelled ? "cancelled" : "finished",
-                });
-                if (r?.success) {
-                  apnsSuccess = true;
-                  await clearActivityToken(userId, devId); // clean up after successful end
-                }
-                if (isTokenInvalid(r)) await clearActivityToken(userId, devId);
-                log.info(`[MQTT-LA] print_${isCancelled ? "cancelled" : "finished"} for ${devId}: ${r?.success ? "sent" : "failed"}`);
-              } else {
-                log.warn(`[MQTT-LA] No activity token for ${devId}, cannot end LA`);
-              }
-            } else {
-              // UPDATE (pause, resume): use activity update token
-              const actToken = getActivityToken(user, devId);
-              if (actToken) {
-                const status = gcodeState === "PAUSE" ? "paused" : "printing";
-                let laTitle = jobTitle;
-                if (gcodeState === "PAUSE") {
-                  const hmsAlerts = Array.isArray(state.hms) ? state.hms : [];
-                  if (hmsAlerts.length > 0) {
-                    const firstReason = lookupHmsError(hmsAlerts[0].attr, hmsAlerts[0].code);
-                    if (firstReason) laTitle = firstReason;
-                  } else {
-                    laTitle = "Paused by user";
-                  }
-                }
-                const contentState = {
-                  jobTitle: laTitle, progress,
-                  startTime: nowSec,
-                  endTime: remaining > 0 ? nowSec + remaining : nowSec,
-                  status,
-                };
-                const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10);
-                if (r?.success) apnsSuccess = true;
-                if (isTokenInvalid(r)) await clearActivityToken(userId, devId);
-                log.info(`[MQTT-LA] ${notification.data.type} for ${devId}: ${progress * 100 | 0}% — ${r?.success ? "sent" : "failed"}`);
-              } else {
-                log.warn(`[MQTT-LA] No activity token for ${devId}, cannot update LA`);
-              }
-            }
-          } catch (e) {
-            log.error(`[MQTT-LA] Error for ${devId}: ${e.message}`);
-          }
-        }
-
-        // Only mark MQTT as having handled this after successful delivery
-        // so the poller can retry if APNs failed
         if (apnsSuccess || !apns.isConfigured()) {
           await PrinterState.findOneAndUpdate(
             { user_id: userId, printer_dev_id: devId },

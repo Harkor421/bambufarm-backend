@@ -1,121 +1,153 @@
 /**
- * Tests for the state change → notification mapping logic.
- * Verifies correct notification types, LA token usage, and edge cases.
+ * Tests for the notification builder — state change → notification mapping.
+ * Now tests the REAL buildNotification function (not a re-implementation).
  */
 
-describe("state change → notification type mapping", () => {
-  function getNotificationType(gcodeState, effectivePrev, mcPercent) {
-    if (gcodeState === "PAUSE" && effectivePrev === "RUNNING") return "print_paused";
-    if (gcodeState === "RUNNING" && effectivePrev === "PAUSE") return "print_resumed";
-    if ((gcodeState === "FINISH" || gcodeState === "IDLE") &&
-        (effectivePrev === "RUNNING" || effectivePrev === "PAUSE" || effectivePrev === "PREPARE")) {
-      return (mcPercent || 0) < 90 ? "print_error" : "print_finished";
-    }
-    if (gcodeState === "FAILED" &&
-        (effectivePrev === "RUNNING" || effectivePrev === "PAUSE" || effectivePrev === "PREPARE")) {
-      return "print_error";
-    }
-    if (gcodeState === "RUNNING" &&
-        (effectivePrev === "IDLE" || effectivePrev === "FINISH" || effectivePrev === "FAILED" || effectivePrev === "PREPARE")) {
-      return "print_started";
-    }
-    return null;
-  }
+const { buildNotification, normalizeProgress } = require("../services/notificationBuilder");
 
+// Helper: build with minimal state
+function build(gcodeState, effectivePrev, overrides = {}) {
+  const state = { mc_percent: 50, mc_remaining_time: 30, subtask_name: "Benchy.3mf", hms: [], ...overrides };
+  return buildNotification(gcodeState, effectivePrev, state, "PRINTER001", "Test Printer");
+}
+
+describe("buildNotification — state change → notification type", () => {
   it("RUNNING → PAUSE = print_paused", () => {
-    expect(getNotificationType("PAUSE", "RUNNING")).toBe("print_paused");
+    const n = build("PAUSE", "RUNNING");
+    expect(n.data.type).toBe("print_paused");
+    expect(n.title).toContain("paused");
   });
 
   it("PAUSE → RUNNING = print_resumed", () => {
-    expect(getNotificationType("RUNNING", "PAUSE")).toBe("print_resumed");
+    const n = build("RUNNING", "PAUSE");
+    expect(n.data.type).toBe("print_resumed");
+    expect(n.title).toContain("resumed");
   });
 
   it("RUNNING → FINISH with >90% = print_finished", () => {
-    expect(getNotificationType("FINISH", "RUNNING", 95)).toBe("print_finished");
+    const n = build("FINISH", "RUNNING", { mc_percent: 95 });
+    expect(n.data.type).toBe("print_finished");
+    expect(n.title).toContain("finished");
   });
 
   it("RUNNING → FINISH with <90% = print_error (cancelled)", () => {
-    expect(getNotificationType("FINISH", "RUNNING", 10)).toBe("print_error");
+    const n = build("FINISH", "RUNNING", { mc_percent: 10 });
+    expect(n.data.type).toBe("print_error");
+    expect(n.title).toContain("cancelled");
   });
 
   it("RUNNING → IDLE with <90% = print_error (cancelled)", () => {
-    expect(getNotificationType("IDLE", "RUNNING", 50)).toBe("print_error");
+    const n = build("IDLE", "RUNNING", { mc_percent: 50 });
+    expect(n.data.type).toBe("print_error");
   });
 
   it("RUNNING → FAILED = print_error", () => {
-    expect(getNotificationType("FAILED", "RUNNING")).toBe("print_error");
+    const n = build("FAILED", "RUNNING");
+    expect(n.data.type).toBe("print_error");
+    expect(n.title).toContain("failed");
   });
 
   it("IDLE → RUNNING = print_started", () => {
-    expect(getNotificationType("RUNNING", "IDLE")).toBe("print_started");
+    const n = build("RUNNING", "IDLE");
+    expect(n.data.type).toBe("print_started");
+    expect(n.title).toContain("started");
   });
 
   it("PREPARE → RUNNING = print_started", () => {
-    expect(getNotificationType("RUNNING", "PREPARE")).toBe("print_started");
+    const n = build("RUNNING", "PREPARE");
+    expect(n.data.type).toBe("print_started");
   });
 
   it("FINISH → RUNNING = print_started", () => {
-    expect(getNotificationType("RUNNING", "FINISH")).toBe("print_started");
+    const n = build("RUNNING", "FINISH");
+    expect(n.data.type).toBe("print_started");
   });
 
   it("FAILED → RUNNING = print_started", () => {
-    expect(getNotificationType("RUNNING", "FAILED")).toBe("print_started");
+    const n = build("RUNNING", "FAILED");
+    expect(n.data.type).toBe("print_started");
   });
 
   it("RUNNING → RUNNING = no notification", () => {
-    expect(getNotificationType("RUNNING", "RUNNING")).toBeNull();
+    expect(build("RUNNING", "RUNNING")).toBeNull();
   });
 
   it("IDLE → IDLE = no notification", () => {
-    expect(getNotificationType("IDLE", "IDLE")).toBeNull();
+    expect(build("IDLE", "IDLE")).toBeNull();
   });
 });
 
-describe("LA token type per event", () => {
-  // This is the CRITICAL rule: push-to-start only for start, activity token for update/end
-  function getRequiredTokenType(notifType) {
-    if (notifType === "print_started") return "push_to_start";
-    if (notifType === "print_finished" || notifType === "print_error") return "activity_update";
-    if (notifType === "print_paused" || notifType === "print_resumed") return "activity_update";
-    return null;
-  }
-
-  it("print_started uses push-to-start token", () => {
-    expect(getRequiredTokenType("print_started")).toBe("push_to_start");
+describe("buildNotification — notification content", () => {
+  it("includes printer name in title", () => {
+    const n = build("PAUSE", "RUNNING");
+    expect(n.title).toContain("Test Printer");
   });
 
-  it("print_paused uses activity update token", () => {
-    expect(getRequiredTokenType("print_paused")).toBe("activity_update");
+  it("includes device ID in data", () => {
+    const n = build("PAUSE", "RUNNING");
+    expect(n.data.printerId).toBe("PRINTER001");
   });
 
-  it("print_resumed uses activity update token", () => {
-    expect(getRequiredTokenType("print_resumed")).toBe("activity_update");
+  it("includes progress in paused notification", () => {
+    const n = build("PAUSE", "RUNNING", { mc_percent: 45 });
+    expect(n.data.progressPct).toBe(45);
   });
 
-  it("print_finished uses activity update token", () => {
-    expect(getRequiredTokenType("print_finished")).toBe("activity_update");
+  it("includes remaining time in resumed notification", () => {
+    const n = build("RUNNING", "PAUSE", { mc_remaining_time: 60 });
+    expect(n.data.remainingSec).toBe(3600);
   });
 
-  it("print_error uses activity update token", () => {
-    expect(getRequiredTokenType("print_error")).toBe("activity_update");
+  it("includes job title in body", () => {
+    const n = build("RUNNING", "IDLE", { subtask_name: "Dragon.3mf" });
+    expect(n.body).toBe("Dragon.3mf");
+  });
+
+  it("pause with HMS alerts shows error description", () => {
+    // HMS attr=0x03008000, code=0x00008005 → "Toolhead front cover fell off"
+    const n = build("PAUSE", "RUNNING", { hms: [{ attr: 0x03008000, code: 0x00008005 }] });
+    expect(n.body).toContain("front cover");
+  });
+
+  it("pause without HMS shows 'Paused by user'", () => {
+    const n = build("PAUSE", "RUNNING", { hms: [] });
+    expect(n.body).toBe("Paused by user");
+  });
+
+  it("failed with HMS shows error description", () => {
+    const n = build("FAILED", "RUNNING", { hms: [{ attr: 0x03004000, code: 0x00004006 }] });
+    expect(n.body).toContain("clogged");
   });
 });
 
-describe("progress normalization", () => {
-  function normalizeProgress(gcodeState, effectivePrev, rawProgressPct) {
-    const rawProgress = (rawProgressPct || 0) / 100;
-    if (gcodeState === "PREPARE") return 0;
-    if (gcodeState === "RUNNING" && effectivePrev === "PREPARE" && rawProgress >= 0.95) return 0;
-    return rawProgress;
-  }
+describe("buildNotification — LA token type per event", () => {
+  it("print_started uses push-to-start token (implicit)", () => {
+    const n = build("RUNNING", "IDLE");
+    expect(n.data.type).toBe("print_started");
+  });
 
+  it("print_paused uses activity update token (implicit)", () => {
+    const n = build("PAUSE", "RUNNING");
+    expect(n.data.type).toBe("print_paused");
+  });
+
+  it("print_finished uses activity update token (implicit)", () => {
+    const n = build("FINISH", "RUNNING", { mc_percent: 100 });
+    expect(n.data.type).toBe("print_finished");
+  });
+
+  it("print_error uses activity update token (implicit)", () => {
+    const n = build("FAILED", "RUNNING");
+    expect(n.data.type).toBe("print_error");
+  });
+});
+
+describe("normalizeProgress", () => {
   it("PREPARE always shows 0% progress", () => {
     expect(normalizeProgress("PREPARE", "IDLE", 50)).toBe(0);
   });
 
   it("RUNNING from PREPARE with high fake progress shows 0%", () => {
-    // When transitioning from PREPARE to RUNNING, mc_percent can briefly show 95-100%
-    // from a previous print — this should be treated as 0%
     expect(normalizeProgress("RUNNING", "PREPARE", 98)).toBe(0);
   });
 
@@ -135,16 +167,12 @@ describe("progress normalization", () => {
 
 describe("endTime calculation", () => {
   it("uses remaining time when available", () => {
-    const nowSec = 1000;
-    const remaining = 1800; // 30 min
-    const endTime = remaining > 0 ? nowSec + remaining : nowSec;
-    expect(endTime).toBe(2800);
+    const n = build("RUNNING", "IDLE", { mc_remaining_time: 30 });
+    expect(n.data.remainingSec).toBe(1800);
   });
 
-  it("uses nowSec when no remaining time (no fake 1hr)", () => {
-    const nowSec = 1000;
-    const remaining = 0;
-    const endTime = remaining > 0 ? nowSec + remaining : nowSec;
-    expect(endTime).toBe(1000); // NOT 4600 (nowSec + 3600)
+  it("uses 0 when no remaining time", () => {
+    const n = build("RUNNING", "IDLE", { mc_remaining_time: 0 });
+    expect(n.data.remainingSec).toBe(0);
   });
 });

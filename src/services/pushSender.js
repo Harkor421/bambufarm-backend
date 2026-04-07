@@ -1,10 +1,8 @@
 const axios = require("axios");
 const log = require("../utils/logger");
+const { broadcastText, isTecnoprintsAccount } = require("./tecnoprintsBroadcast");
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
-const TECNOPRINTS_BROADCAST_URL = "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints";
-const TECNOPRINTS_BAMBU_UID = "1789751384";
-let _lastBroadcast = { message: "", at: 0 }; // dedup: same message within 30s
 
 /**
  * Send a push notification via Expo's push service.
@@ -40,9 +38,10 @@ async function sendPush(expoPushToken, { title, body, data }) {
 
     log.info(`[PUSH] Sent to ${expoPushToken.slice(0, 30)}...: "${title}"`);
 
-    // Also broadcast to Tecnoprints endpoint for aerustudiohelp account
-    if (data?.bambuUid === TECNOPRINTS_BAMBU_UID) {
-      _broadcastTecnoprints(title, body).catch(() => {});
+    // Also broadcast to Tecnoprints WhatsApp for matching account
+    if (data?.bambuUid && isTecnoprintsAccount(data.bambuUid)) {
+      const msg = title && body ? `${title}: ${body}` : title || body || "";
+      broadcastText(msg).catch(() => {});
     }
 
     return r.data;
@@ -50,24 +49,6 @@ async function sendPush(expoPushToken, { title, body, data }) {
     log.error(`[PUSH] Failed: ${err.message}`);
     return null;
   }
-}
-
-/**
- * Forward notification to Tecnoprints broadcast endpoint.
- */
-async function _broadcastTecnoprints(title, body) {
-  try {
-    const message = title && body ? `${title}: ${body}` : title || body || "";
-    if (!message) return;
-    // Deduplicate: skip if same message was sent in the last 30s
-    if (message === _lastBroadcast.message && Date.now() - _lastBroadcast.at < 30000) return;
-    _lastBroadcast = { message, at: Date.now() };
-    await axios.post(TECNOPRINTS_BROADCAST_URL, { message }, {
-      timeout: 5000,
-      headers: { "Content-Type": "application/json" },
-    });
-    log.debug(`[PUSH] Tecnoprints broadcast: "${message.slice(0, 80)}"`);
-  } catch {}
 }
 
 module.exports = { sendPush };

@@ -11,16 +11,17 @@
 const Anthropic = require("@anthropic-ai/sdk").default;
 const axios = require("axios");
 const log = require("../utils/logger");
+const config = require("../config");
 const { sendPush } = require("./pushSender");
 const User = require("../db/models/User");
 const PrintAnalysis = require("../db/models/PrintAnalysis");
 
-const VISION_MODEL = "claude-haiku-4-5-20251001";
-const DEFAULT_INTERVAL = 60000; // check every 60s, but only call API at percentage milestones
-const NOTIFY_COOLDOWN = 900000; // 15 minutes
-const REQUIRED_CONSECUTIVE = 2; // consecutive failures before notifying
-const MIN_LAYER = 5;
-const MIN_PERCENT = 3;
+const VISION_MODEL = config.vision.model;
+const DEFAULT_INTERVAL = config.vision.intervalMs;
+const NOTIFY_COOLDOWN = config.vision.notifyCooldown;
+const REQUIRED_CONSECUTIVE = config.vision.consecutiveFailures;
+const MIN_LAYER = config.vision.minLayer;
+const MIN_PERCENT = config.vision.minPercent;
 
 const VISION_PROMPT = `You are a 3D print quality inspector. Analyze this camera frame from a Bambu Lab FDM printer.
 
@@ -51,9 +52,9 @@ Rules:
 - confidence is 0-100
 - issues is an array of strings from the list above (lowercase)`;
 
-const PERCENT_STEP = 5; // analyze every 5% progress (long prints)
-const MIN_ANALYSIS_GAP = 180000; // minimum 3 min between API calls (prevents spam on short prints)
-const MAX_ANALYSIS_GAP = 600000; // maximum 10 min between API calls (ensures coverage on long prints)
+const PERCENT_STEP = config.vision.percentStep;
+const MIN_ANALYSIS_GAP = config.vision.minAnalysisGap;
+const MAX_ANALYSIS_GAP = config.vision.maxAnalysisGap;
 
 class PrintVisionService {
   constructor() {
@@ -67,12 +68,12 @@ class PrintVisionService {
   }
 
   start() {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = config.vision.anthropicApiKey;
     if (!apiKey) {
       log.warn("[VISION] No ANTHROPIC_API_KEY set, vision service disabled");
       return;
     }
-    if (process.env.VISION_ENABLED !== "true") {
+    if (!config.vision.enabled) {
       log.info("[VISION] Service disabled (VISION_ENABLED != true)");
       return;
     }
@@ -81,7 +82,7 @@ class PrintVisionService {
     const intervalMs = Number(process.env.VISION_INTERVAL_MS) || DEFAULT_INTERVAL;
     this.running = true;
 
-    log.info(`[VISION] Starting — interval=${intervalMs / 1000}s target=${process.env.VISION_TARGET_UID || "none"}`);
+    log.info(`[VISION] Starting — interval=${intervalMs / 1000}s target=${config.vision.targetUid || "none"}`);
 
     // Run first analysis after 30s (let MQTT populate)
     setTimeout(() => {
@@ -101,7 +102,7 @@ class PrintVisionService {
   }
 
   async _analyzeAll() {
-    const targetUid = process.env.VISION_TARGET_UID;
+    const targetUid = config.vision.targetUid;
     if (!targetUid) return;
 
     // Get all printer states for the target user
@@ -241,7 +242,7 @@ class PrintVisionService {
   }
 
   async _handleResult(bambuUid, devId, result, mqttState) {
-    if (result.verdict === "failure" && result.confidence >= 40) {
+    if (result.verdict === "failure" && result.confidence >= config.vision.confidenceThreshold) {
       const count = (this.consecutiveFailures.get(devId) || 0) + 1;
       this.consecutiveFailures.set(devId, count);
 
@@ -293,27 +294,11 @@ class PrintVisionService {
   }
 
   async _broadcastWithImage(bambuUid, devId, result, mqttState) {
-    try {
-      const frame = require("./wsManager").getLatestFrame(bambuUid, devId);
-      const issueList = result.issues?.join(", ") || "print issue";
-      const message = `🚨 ${devId} — ${issueList}: ${result.detail || "Check print"}`;
-
-      const FormData = require("form-data");
-      const form = new FormData();
-      form.append("message", message);
-      if (frame && frame.length > 100) {
-        form.append("media", frame, { filename: `${devId}.jpg`, contentType: "image/jpeg" });
-      }
-
-      await axios.post(
-        "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints",
-        form,
-        { headers: form.getHeaders(), timeout: 10000 }
-      );
-      log.info(`[VISION] Tecnoprints broadcast sent for ${devId} (${frame ? frame.length : 0} bytes)`);
-    } catch (e) {
-      log.warn(`[VISION] Tecnoprints broadcast failed: ${e.message}`);
-    }
+    const { broadcastWithImage } = require("./tecnoprintsBroadcast");
+    const frame = require("./wsManager").getLatestFrame(bambuUid, devId);
+    const issueList = result.issues?.join(", ") || "print issue";
+    const message = `🚨 ${devId} — ${issueList}: ${result.detail || "Check print"}`;
+    await broadcastWithImage(message, frame);
   }
 }
 

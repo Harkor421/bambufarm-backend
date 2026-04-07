@@ -113,6 +113,14 @@ function verifyBambuToken(accessToken) {
 
 class WsManager {
   constructor() {
+    this._printerStateGetter = null; // set via setPrinterStateGetter()
+
+    // Listen for state changes to update bridge camera demand
+    const eventBus = require("./eventBus");
+    eventBus.on("printer:stateChange", ({ bambuUid }) => {
+      this._notifyBridgeDemand(bambuUid);
+    });
+
     /** @type {Map<string, Set<import('ws')>>} bambuUid → Set of bridge WS connections */
     this.bridges = new Map();
 
@@ -470,15 +478,16 @@ class WsManager {
     const demanded = new Set();
 
     // Always stream cameras for printers that are currently printing
-    try {
-      const mqttService = require("./mqttPrinterService");
-      const states = mqttService.getAllPrinterStates(userId);
-      for (const [devId, state] of Object.entries(states)) {
-        if (state.gcode_state === "RUNNING" || state.gcode_state === "PAUSE" || state.gcode_state === "PREPARE") {
-          demanded.add(devId);
+    if (this._printerStateGetter) {
+      try {
+        const states = this._printerStateGetter(userId);
+        for (const [devId, state] of Object.entries(states)) {
+          if (state.gcode_state === "RUNNING" || state.gcode_state === "PAUSE" || state.gcode_state === "PREPARE") {
+            demanded.add(devId);
+          }
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
     // App clients
     const clients = this.appClients.get(userId);
@@ -588,6 +597,14 @@ class WsManager {
       this._commandCallbacks.delete(requestId);
       resolve({ success: false, error: "Bridge WebSocket not open" });
     });
+  }
+
+  /**
+   * Set the function used to get printer states (avoids circular dep with mqttPrinterService).
+   * @param {(uid: string) => object} fn
+   */
+  setPrinterStateGetter(fn) {
+    this._printerStateGetter = fn;
   }
 
   close() {

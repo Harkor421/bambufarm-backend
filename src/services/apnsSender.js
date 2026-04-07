@@ -3,15 +3,16 @@ const jwt = require("jsonwebtoken");
 const fs = require("fs");
 const log = require("../utils/logger");
 
-const APNS_KEY_PATH = process.env.APNS_KEY_PATH;
-const APNS_KEY_ID = process.env.APNS_KEY_ID;
-const APNS_TEAM_ID = process.env.APNS_TEAM_ID;
-const APNS_KEY_CONTENTS = process.env.APNS_KEY_CONTENTS; // fallback: raw p8 key as env var
-const BUNDLE_ID = "com.harkor421.bambufarm";
+const config = require("../config");
+const APNS_KEY_PATH = config.apns.keyPath;
+const APNS_KEY_ID = config.apns.keyId;
+const APNS_TEAM_ID = config.apns.teamId;
+const APNS_KEY_CONTENTS = config.apns.keyContents;
+const BUNDLE_ID = config.apns.bundleId;
 const APNS_TOPIC = `${BUNDLE_ID}.push-type.liveactivity`;
-const APNS_HOST_PROD = "api.push.apple.com";
-const APNS_HOST_SANDBOX = "api.sandbox.push.apple.com";
-const APNS_HOST = process.env.APNS_HOST || APNS_HOST_PROD;
+const APNS_HOST_PROD = config.apns.host;
+const APNS_HOST_SANDBOX = config.apns.hostSandbox;
+const APNS_HOST = config.apns.host;
 
 let apnsKey = null;
 let cachedJWT = null;
