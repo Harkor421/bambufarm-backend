@@ -254,9 +254,10 @@ class MqttPrinterService {
    */
   async start() {
     log.info("[MQTT] Starting MQTT printer service...");
+    this._connectingUsers = false;
     await this._connectAllUsers();
-    // Re-check for new users every 60s
-    this.pollTimer = setInterval(() => this._connectAllUsers(), 60000);
+    // Re-check for new users every 120s (longer interval to avoid overlapping with rate limits)
+    this.pollTimer = setInterval(() => this._connectAllUsers(), 120000);
   }
 
   stop() {
@@ -333,6 +334,11 @@ class MqttPrinterService {
   }
 
   async _connectAllUsers() {
+    if (this._connectingUsers) {
+      log.debug("[MQTT] Skipping poll — previous connectAllUsers still running");
+      return;
+    }
+    this._connectingUsers = true;
     try {
       log.debug("[MQTT] Connecting all users...");
       const users = await User.find({ fail_count: { $lt: 5 } }).lean();
@@ -349,6 +355,7 @@ class MqttPrinterService {
       }
 
       let userIndex = 0;
+      let rateLimitBackoff = 10000; // start at 10s, doubles on consecutive 429s
       for (const user of users) {
         const id = String(user._id);
         if (this.connections.has(id)) {
@@ -361,9 +368,21 @@ class MqttPrinterService {
           this.connections.delete(id);
         }
 
+        // Early skip: if bambu_uid is cached and already connected, no API call needed
+        const cachedUid = user.bambu_uid ? String(user.bambu_uid) : null;
+        if (cachedUid && connectedBambuUids.has(cachedUid)) {
+          log.debug(`[MQTT] User ${id} uid=${cachedUid} already connected (cached), skipping`);
+          continue;
+        }
+
         // Stagger API calls to avoid Bambu 429 rate limits
-        if (userIndex > 0 && userIndex % 10 === 0) {
-          await new Promise(r => setTimeout(r, 2000));
+        // 200ms between each user, 3s pause every 20 users
+        if (userIndex > 0) {
+          await new Promise(r => setTimeout(r, 200));
+          if (userIndex % 20 === 0) {
+            log.debug(`[MQTT] Stagger pause after ${userIndex} users...`);
+            await new Promise(r => setTimeout(r, 3000));
+          }
         }
         userIndex++;
 
@@ -371,7 +390,7 @@ class MqttPrinterService {
           const accessToken = await ensureFreshToken(user);
 
           // Skip if we already have the bambu_uid cached in DB
-          let bambuUid = user.bambu_uid ? String(user.bambu_uid) : null;
+          let bambuUid = cachedUid;
           if (!bambuUid) {
             const profile = await axios.get(`${BAMBU_API}/v1/user-service/my/profile`, {
               headers: { Authorization: `Bearer ${accessToken}` },
@@ -392,6 +411,7 @@ class MqttPrinterService {
             timeout: 10000,
           });
           const devices = printers.data?.devices || [];
+          rateLimitBackoff = 10000; // reset backoff on success
           const printerIds = new Set(devices.map(d => d.dev_id));
           const printerNames = {};
           for (const d of devices) printerNames[d.dev_id] = d.name;
@@ -520,9 +540,10 @@ class MqttPrinterService {
           conn.connect();
         } catch (err) {
           if (err.response?.status === 429) {
-            // Rate limited — wait and continue with remaining users
-            log.warn(`[MQTT] Rate limited setting up user ${id}, waiting 10s...`);
-            await new Promise(r => setTimeout(r, 10000));
+            // Rate limited — exponential backoff (10s, 20s, 40s, max 60s)
+            log.warn(`[MQTT] Rate limited setting up user ${id}, waiting ${rateLimitBackoff / 1000}s...`);
+            await new Promise(r => setTimeout(r, rateLimitBackoff));
+            rateLimitBackoff = Math.min(rateLimitBackoff * 2, 60000);
           } else {
             log.error(`[MQTT] Failed to set up user ${id}: ${err.message}`);
           }
@@ -530,6 +551,8 @@ class MqttPrinterService {
       }
     } catch (err) {
       log.error(`[MQTT] Error connecting users: ${err.message}`);
+    } finally {
+      this._connectingUsers = false;
     }
   }
 
