@@ -104,8 +104,9 @@ describe("buildNotification — notification content", () => {
   });
 
   it("pause with HMS alerts shows error description", () => {
-    // HMS attr=0x03008000, code=0x00008005 → "Toolhead front cover fell off"
-    const n = build("PAUSE", "RUNNING", { hms: [{ attr: 0x03008000, code: 0x00008005 }] });
+    // HMS ecode 0300120000020001 → "The front cover of the toolhead fell off."
+    // attr = 0x03001200, code = 0x00020001
+    const n = build("PAUSE", "RUNNING", { hms: [{ attr: 0x03001200, code: 0x00020001 }] });
     expect(n.body).toContain("front cover");
   });
 
@@ -115,7 +116,9 @@ describe("buildNotification — notification content", () => {
   });
 
   it("failed with HMS shows error description", () => {
-    const n = build("FAILED", "RUNNING", { hms: [{ attr: 0x03004000, code: 0x00004006 }] });
+    // HMS ecode 03001A0000020002 → "The nozzle is clogged with filament."
+    // attr = 0x03001A00, code = 0x00020002
+    const n = build("FAILED", "RUNNING", { hms: [{ attr: 0x03001A00, code: 0x00020002 }] });
     expect(n.body).toContain("clogged");
   });
 });
