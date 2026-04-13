@@ -164,11 +164,21 @@ class WsManager {
     // changes fire without actually changing the demanded printer set.
     this._lastDemandSig = new Map();
 
+    // Hysteresis: when a printer leaves the active state set, keep it demanded
+    // for a grace window so brief MQTT flickers (RUNNING→IDLE→RUNNING in a few
+    // seconds) don't cause camera disconnect/reconnect cycles.
+    // Map<`${uid}:${printerId}`, expiresAtMs>
+    this._demandGrace = new Map();
+    this._DEMAND_GRACE_MS = 90 * 1000;
+
     // Listen for state changes to update bridge camera demand
     const eventBus = require("./eventBus");
     eventBus.on("printer:stateChange", ({ bambuUid }) => {
       this._notifyBridgeDemand(bambuUid);
     });
+
+    // Sweep expired grace entries every 30s and re-send demand if anything dropped
+    this._graceSweepInterval = setInterval(() => this._sweepDemandGrace(), 30000);
 
     /** @type {Map<string, Set<import('ws')>>} bambuUid → Set of bridge WS connections */
     this.bridges = new Map();
@@ -527,17 +537,35 @@ class WsManager {
 
   _getDemandedPrinters(userId) {
     const demanded = new Set();
+    const now = Date.now();
 
     // Always stream cameras for printers that are currently printing
     if (this._printerStateGetter) {
       try {
         const states = this._printerStateGetter(userId);
         for (const [devId, state] of Object.entries(states)) {
-          if (state.gcode_state === "RUNNING" || state.gcode_state === "PAUSE" || state.gcode_state === "PREPARE") {
+          const active =
+            state.gcode_state === "RUNNING" ||
+            state.gcode_state === "PAUSE" ||
+            state.gcode_state === "PREPARE";
+          if (active) {
             demanded.add(devId);
+            // Refresh grace window so this printer stays demanded for 90s after it goes idle
+            this._demandGrace.set(`${userId}:${devId}`, now + this._DEMAND_GRACE_MS);
           }
         }
       } catch {}
+    }
+
+    // Include printers still within their grace window (hysteresis)
+    for (const [key, expiresAt] of this._demandGrace) {
+      if (!key.startsWith(`${userId}:`)) continue;
+      if (expiresAt <= now) {
+        this._demandGrace.delete(key);
+        continue;
+      }
+      const devId = key.slice(userId.length + 1);
+      demanded.add(devId);
     }
 
     // App clients
@@ -558,6 +586,24 @@ class WsManager {
       }
     }
     return demanded;
+  }
+
+  /**
+   * Sweep grace entries that have expired and notify bridges if the set shrank.
+   * Runs periodically because a printer going idle may not trigger any further
+   * state-change events — we need an independent tick to drop it from demand.
+   */
+  _sweepDemandGrace() {
+    const now = Date.now();
+    const affectedUsers = new Set();
+    for (const [key, expiresAt] of this._demandGrace) {
+      if (expiresAt <= now) {
+        this._demandGrace.delete(key);
+        const uid = key.split(":", 1)[0];
+        affectedUsers.add(uid);
+      }
+    }
+    for (const uid of affectedUsers) this._notifyBridgeDemand(uid);
   }
 
   _notifyBridgeDemand(userId) {
@@ -668,6 +714,7 @@ class WsManager {
 
   close() {
     if (this._heartbeatInterval) clearInterval(this._heartbeatInterval);
+    if (this._graceSweepInterval) clearInterval(this._graceSweepInterval);
     if (this.wss) this.wss.close();
   }
 }
