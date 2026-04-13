@@ -18,13 +18,50 @@ const log = require("../utils/logger");
  */
 
 const https = require("https");
+const crypto = require("crypto");
 
 const MSG_CAMERA_FRAME = 0x01;
 
-/**
- * Verify a Bambu access token by calling the Bambu Cloud API.
- * Returns the uid string on success, or null on failure.
- */
+// Shared HTTPS agent with connection pooling — reuses TCP connections to Bambu API
+// instead of opening a fresh socket per auth call (fixes socket exhaustion under load).
+const bambuHttpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 25,
+  maxFreeSockets: 10,
+  timeout: 10000,
+  keepAliveMsecs: 30000,
+});
+
+// Token verification cache: tokenHash → { uid, expiresAt }
+// Avoids hammering Bambu API when the same bridge reconnects repeatedly.
+const tokenCache = new Map();
+const TOKEN_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+function hashToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function getCachedUid(token) {
+  const key = hashToken(token);
+  const entry = tokenCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    tokenCache.delete(key);
+    return null;
+  }
+  return entry.uid;
+}
+
+function cacheUid(token, uid) {
+  const key = hashToken(token);
+  tokenCache.set(key, { uid, expiresAt: Date.now() + TOKEN_CACHE_TTL });
+  // Prevent unbounded growth — cap at 1000 entries
+  if (tokenCache.size > 1000) {
+    const firstKey = tokenCache.keys().next().value;
+    tokenCache.delete(firstKey);
+  }
+}
+
 /**
  * Decode a JWT payload (handles base64url encoding properly).
  */
@@ -32,7 +69,6 @@ function decodeJwtPayload(token) {
   try {
     const parts = token.split(".");
     if (parts.length < 2) return null;
-    // base64url → base64
     let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
     while (b64.length % 4) b64 += "=";
     return JSON.parse(Buffer.from(b64, "base64").toString());
@@ -41,73 +77,81 @@ function decodeJwtPayload(token) {
   }
 }
 
+/**
+ * Verify a Bambu access token by calling the Bambu Cloud API.
+ * Returns the uid string on success, or null on failure.
+ * Uses a 10min cache + pooled HTTPS agent to survive high reconnect load.
+ */
 function verifyBambuToken(accessToken) {
   return new Promise((resolve) => {
-    // First try JWT decode for uid
-    const payload = decodeJwtPayload(accessToken);
-    if (payload) {
-      const uid = payload.uid || payload.sub || payload.user_id;
-      if (uid) {
-        log.info(`[WS] Token uid=${uid} (from JWT)`);
-        // Still verify the token is valid by calling the API
-        const req = https.request(
-          {
-            hostname: "api.bambulab.com",
-            path: "/v1/iot-service/api/user/bind",
-            method: "GET",
-            headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-          },
-          (res) => {
-            let body = "";
-            res.on("data", (c) => (body += c));
-            res.on("end", () => {
-              resolve(res.statusCode === 200 ? String(uid) : null);
-            });
-          }
-        );
-        req.on("error", () => resolve(null));
-        req.setTimeout(10000, () => { req.destroy(); resolve(null); });
-        req.end();
-        return;
-      }
-    }
+    // Fast path: cached uid for this exact token
+    const cached = getCachedUid(accessToken);
+    if (cached) return resolve(cached);
 
-    // JWT decode failed — call Bambu user profile API to get stable uid
-    const req = https.request(
-      {
-        hostname: "api.bambulab.com",
-        path: "/v1/user-service/my/profile",
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json",
-        },
-      },
-      (res) => {
-        let body = "";
-        res.on("data", (c) => (body += c));
-        res.on("end", () => {
-          if (res.statusCode !== 200) return resolve(null);
-          try {
-            const data = JSON.parse(body);
-            const uid = data.uid || data.userId || data.user_id || data.id || (data.data && (data.data.uid || data.data.userId || data.data.id));
-            if (uid) {
-              log.info(`[WS] Token verified, uid=${uid} (from profile API)`);
-              return resolve(String(uid));
-            }
-            // Log the response shape so we can debug
-            log.info(`[WS] Profile response keys: ${Object.keys(data).join(", ")}`);
-            if (data.data) log.info(`[WS] Profile data keys: ${Object.keys(data.data).join(", ")}`);
-            resolve(null);
-          } catch {
-            resolve(null);
+    const handleResponse = (res, body, uidFromJwt) => {
+      const status = res.statusCode;
+      if (status === 200) {
+        if (uidFromJwt) {
+          cacheUid(accessToken, uidFromJwt);
+          return resolve(String(uidFromJwt));
+        }
+        try {
+          const data = JSON.parse(body);
+          const uid = data.uid || data.userId || data.user_id || data.id ||
+            (data.data && (data.data.uid || data.data.userId || data.data.id));
+          if (uid) {
+            cacheUid(accessToken, String(uid));
+            return resolve(String(uid));
           }
-        });
+          log.warn(`[WS] Profile 200 but no uid in response: keys=${Object.keys(data).join(",")}`);
+          return resolve(null);
+        } catch {
+          return resolve(null);
+        }
       }
-    );
-    req.on("error", () => resolve(null));
-    req.setTimeout(10000, () => { req.destroy(); resolve(null); });
-    req.end();
+      // Log specific error codes so we can see rate-limiting / outages
+      if (status === 429) log.warn(`[WS] Bambu API rate-limited (429) on token verify`);
+      else if (status >= 500) log.warn(`[WS] Bambu API error ${status} on token verify`);
+      else if (status === 401 || status === 403) log.info(`[WS] Bambu token rejected (${status})`);
+      else log.warn(`[WS] Bambu API unexpected status ${status} on token verify`);
+      resolve(null);
+    };
+
+    const makeRequest = (path, uidFromJwt) => {
+      const req = https.request(
+        {
+          hostname: "api.bambulab.com",
+          path,
+          method: "GET",
+          agent: bambuHttpsAgent,
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+        },
+        (res) => {
+          let body = "";
+          res.on("data", (c) => (body += c));
+          res.on("end", () => handleResponse(res, body, uidFromJwt));
+        }
+      );
+      req.on("error", (err) => {
+        log.warn(`[WS] Bambu API network error on token verify: ${err.message}`);
+        resolve(null);
+      });
+      req.setTimeout(10000, () => {
+        log.warn(`[WS] Bambu API timeout on token verify (${path})`);
+        req.destroy();
+        resolve(null);
+      });
+      req.end();
+    };
+
+    // Try JWT decode first — if we get a uid we just need to verify the token is valid
+    const payload = decodeJwtPayload(accessToken);
+    const uidFromJwt = payload && (payload.uid || payload.sub || payload.user_id);
+    if (uidFromJwt) {
+      makeRequest("/v1/iot-service/api/user/bind", uidFromJwt);
+    } else {
+      makeRequest("/v1/user-service/my/profile", null);
+    }
   });
 }
 
@@ -192,7 +236,7 @@ class WsManager {
 
     const authTimeout = setTimeout(() => {
       if (!authenticated) ws.close(4001, "Auth timeout");
-    }, 15000);
+    }, 30000);
 
     ws.on("message", (data, isBinary) => {
       if (!authenticated) {
