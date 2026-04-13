@@ -158,7 +158,14 @@ function stopAllCameras() {
 
 function handleDemandUpdate(printerIds) {
   const newDemand = new Set(printerIds);
-  console.log(`[Bridge] Demand: ${printerIds.length ? printerIds.join(", ") : "(none)"}`);
+
+  // Only log when the set actually changes — avoid log spam from duplicate updates.
+  const changed =
+    newDemand.size !== demandedPrinters.size ||
+    [...newDemand].some((id) => !demandedPrinters.has(id));
+  if (changed) {
+    console.log(`[Bridge] Demand: ${printerIds.length ? printerIds.join(", ") : "(none)"}`);
+  }
 
   for (const id of newDemand) {
     if (!demandedPrinters.has(id)) {

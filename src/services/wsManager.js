@@ -159,6 +159,11 @@ class WsManager {
   constructor() {
     this._printerStateGetter = null; // set via setPrinterStateGetter()
 
+    // Last-sent demand signature per user, so we don't resend identical sets.
+    // Prevents log spam and camera disconnect/reconnect cycles when MQTT state
+    // changes fire without actually changing the demanded printer set.
+    this._lastDemandSig = new Map();
+
     // Listen for state changes to update bridge camera demand
     const eventBus = require("./eventBus");
     eventBus.on("printer:stateChange", ({ bambuUid }) => {
@@ -307,6 +312,8 @@ class WsManager {
         this.bridgeMeta.delete(ws);
         const set = this.bridges.get(userId);
         if (set) { set.delete(ws); if (set.size === 0) this.bridges.delete(userId); }
+        // Clear last-sent demand signature so next reconnect gets a fresh full update
+        if (!this.isBridgeConnected(userId)) this._lastDemandSig.delete(userId);
         // Clean up cached frames and throttle entries for this user
         if (!this.isBridgeConnected(userId)) {
           this.latestFrames.delete(userId);
@@ -554,14 +561,20 @@ class WsManager {
   }
 
   _notifyBridgeDemand(userId) {
-    const demanded = this._getDemandedPrinters(userId);
     const bridges = this.bridges.get(userId);
-    if (!bridges) {
-      log.debug(`[WS] No bridges found for uid ${userId} — cannot send demand`);
-      return;
-    }
-    const printerList = Array.from(demanded);
-    log.debug(`[WS] Sending demand_update to ${bridges.size} bridge(s): ${printerList.length} printer(s)`);
+    if (!bridges || bridges.size === 0) return;
+
+    // Sort to get a stable signature — otherwise Set iteration order changes
+    // fire spurious updates that disconnect/reconnect cameras.
+    const demanded = this._getDemandedPrinters(userId);
+    const printerList = Array.from(demanded).sort();
+    const sig = printerList.join(",");
+
+    // Skip if the set hasn't actually changed since the last notification.
+    if (this._lastDemandSig.get(userId) === sig) return;
+    this._lastDemandSig.set(userId, sig);
+
+    log.debug(`[WS] demand_update → ${bridges.size} bridge(s): ${printerList.length} printer(s)`);
     const msg = JSON.stringify({ type: "demand_update", printers: printerList });
     for (const bridgeWs of bridges) {
       if (bridgeWs.readyState === 1) bridgeWs.send(msg);
@@ -570,7 +583,9 @@ class WsManager {
 
   _sendDemandUpdate(bridgeWs, userId) {
     const demanded = this._getDemandedPrinters(userId);
-    bridgeWs.send(JSON.stringify({ type: "demand_update", printers: Array.from(demanded) }));
+    const printerList = Array.from(demanded).sort();
+    this._lastDemandSig.set(userId, printerList.join(","));
+    bridgeWs.send(JSON.stringify({ type: "demand_update", printers: printerList }));
   }
 
   isBridgeConnected(userId) {
