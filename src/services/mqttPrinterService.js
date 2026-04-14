@@ -50,7 +50,7 @@ class PrinterMqttConnection {
 
   connect() {
     if (this.stopped) return;
-    log.info(`[MQTT] Connecting user ${this.userId} (uid=${this.bambuUid})...`);
+    log.debug(`[MQTT] Connecting user ${this.userId} (uid=${this.bambuUid})...`);
 
     try {
       const clientId = `bambufarm_${this.userId}_${Date.now()}`;
@@ -66,7 +66,7 @@ class PrinterMqttConnection {
       this.client.on("connect", () => {
         this.connected = true;
         this.socket = this.client.stream; // for dead-connection check
-        log.info(`[MQTT] Connected for user ${this.userId} (${this.printerIds.size} printers)`);
+        log.debug(`[MQTT] Connected for user ${this.userId} (${this.printerIds.size} printers)`);
         this._subscribeAll();
         // Request full state for all printers
         setTimeout(() => this._pushallAll(), 1000);
@@ -86,7 +86,7 @@ class PrinterMqttConnection {
         this.connected = false;
         this._stopTimers();
         if (!this.stopped) {
-          log.info(`[MQTT] Disconnected for user ${this.userId}, will auto-reconnect`);
+          log.debug(`[MQTT] Disconnected for user ${this.userId}, will auto-reconnect`);
         }
       });
     } catch (err) {
@@ -183,7 +183,7 @@ class PrinterMqttConnection {
 
     // Detect gcode_state changes
     if (p.gcode_state && p.gcode_state !== prev.gcode_state) {
-      log.info(`[MQTT] ${devId}: ${prev.gcode_state || "?"} → ${p.gcode_state} (${merged.mc_percent}%, ${merged.mc_remaining_time}min remaining)`);
+      log.debug(`[MQTT] ${devId}: ${prev.gcode_state || "?"} → ${p.gcode_state} (${merged.mc_percent}%, ${merged.mc_remaining_time}min remaining)`);
       try {
         await this.onStateChange(devId, merged, prev.gcode_state);
       } catch (err) {
@@ -363,7 +363,7 @@ class MqttPrinterService {
           if (existing.connected && existing.socket && !existing.socket.destroyed) {
             continue;
           }
-          log.info(`[MQTT] User ${id} connection is dead, reconnecting...`);
+          log.debug(`[MQTT] User ${id} connection is dead, reconnecting...`);
           existing.stop();
           this.connections.delete(id);
         }
@@ -417,7 +417,7 @@ class MqttPrinterService {
           for (const d of devices) printerNames[d.dev_id] = d.name;
 
           if (printerIds.size === 0) {
-            log.info(`[MQTT] No online printers for user ${id}, skipping`);
+            log.debug(`[MQTT] No online printers for user ${id}, skipping`);
             continue;
           }
 
@@ -507,7 +507,7 @@ class MqttPrinterService {
                 try {
                   const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10);
                   if (r?.success) {
-                    log.info(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}%`);
+                    log.debug(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}%`);
                   } else {
                     log.warn(`[APNS] Progress failed ${pName} (${r?.status}): ${r?.reason?.reason}`);
                   }
@@ -584,7 +584,7 @@ class MqttPrinterService {
     );
 
     // Send push notifications for state transitions
-    log.info(`[MQTT] State change ${devId}: ${prevGcodeState} → ${gcodeState} (user ${userId})`);
+    log.debug(`[MQTT] State change ${devId}: ${prevGcodeState} → ${gcodeState} (user ${userId})`);
 
     // On first connect (prevGcodeState is undefined/"?"), check DB to see if this is truly new
     let effectivePrev = prevGcodeState;
@@ -618,7 +618,7 @@ class MqttPrinterService {
               if (!actToken) continue;
               const r = await apns.sendLiveActivityUpdate(actToken, contentState);
               if (r?.success) {
-                log.info(`[MQTT] LA update sent for ${devId}`);
+                log.debug(`[MQTT] LA update sent for ${devId}`);
                 break;
               }
               if (isTokenInvalid(r)) await clearActivityToken(u._id, devId);

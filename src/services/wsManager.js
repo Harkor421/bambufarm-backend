@@ -54,9 +54,11 @@ function getCachedUid(token) {
 
 function cacheUid(token, uid) {
   const key = hashToken(token);
+  // Delete-then-set refreshes LRU position
+  tokenCache.delete(key);
   tokenCache.set(key, { uid, expiresAt: Date.now() + TOKEN_CACHE_TTL });
-  // Prevent unbounded growth — cap at 1000 entries
-  if (tokenCache.size > 1000) {
+  // Prevent unbounded growth — cap at 5000 entries (enough for 2k users + churn)
+  if (tokenCache.size > 5000) {
     const firstKey = tokenCache.keys().next().value;
     tokenCache.delete(firstKey);
   }
@@ -273,7 +275,7 @@ class WsManager {
               this.bridges.get(userId).add(ws);
 
               ws.send(JSON.stringify({ type: "auth_ok", userId }));
-              log.info(`[WS] Bridge connected for uid ${userId}`);
+              log.debug(`[WS] Bridge connected for uid ${userId}`);
               this._sendDemandUpdate(ws, userId);
               this._notifyBridgeStatus(userId, true);
 
@@ -333,7 +335,7 @@ class WsManager {
             }
           }
         }
-        log.info(`[WS] Bridge disconnected for uid ${userId}`);
+        log.debug(`[WS] Bridge disconnected for uid ${userId}`);
         this._notifyBridgeStatus(userId, this.isBridgeConnected(userId));
       }
     });
@@ -357,11 +359,19 @@ class WsManager {
     if (!this._frameThrottle) this._frameThrottle = new Map();
     this._frameThrottle.set(throttleKey, now);
 
-    // Cache latest frame for public endpoint
+    // Cache latest frame for public endpoint (LRU-capped per user to prevent unbounded growth)
     if (!this.latestFrames.has(userId)) this.latestFrames.set(userId, new Map());
     const userFrames = this.latestFrames.get(userId);
     const isNewCamera = !userFrames.has(printerId);
+    // Map preserves insertion order → delete before set = move-to-end = LRU
+    userFrames.delete(printerId);
     userFrames.set(printerId, jpegPayload);
+    // Evict oldest if over cap (20 printers max per user is generous)
+    const MAX_FRAMES_PER_USER = 20;
+    while (userFrames.size > MAX_FRAMES_PER_USER) {
+      const oldest = userFrames.keys().next().value;
+      userFrames.delete(oldest);
+    }
 
     // Broadcast to public clients if this is the public UID
     const publicUid = process.env.PUBLIC_CAMERA_UID;
@@ -445,7 +455,7 @@ class WsManager {
 
             const bridgeOnline = this.isBridgeConnected(uid);
             ws.send(JSON.stringify({ type: "auth_ok", userId, bridgeOnline }));
-            log.info(`[WS] App connected for uid ${userId} (bridge: ${bridgeOnline ? "online" : "offline"})`);
+            log.debug(`[WS] App connected for uid ${userId} (bridge: ${bridgeOnline ? "online" : "offline"})`);
           });
         } else {
           ws.close(4002, "Invalid auth");
@@ -482,7 +492,7 @@ class WsManager {
         this.appMeta.delete(ws);
         const set = this.appClients.get(userId);
         if (set) { set.delete(ws); if (set.size === 0) this.appClients.delete(userId); }
-        log.info(`[WS] App disconnected for uid ${userId}`);
+        log.debug(`[WS] App disconnected for uid ${userId}`);
         this._notifyBridgeDemand(userId);
       }
     });
@@ -693,7 +703,7 @@ class WsManager {
       for (const bridgeWs of bridges) {
         if (bridgeWs.readyState === 1) {
           bridgeWs.send(msg);
-          log.info(`[WS] Command ${action} → ${devId} sent via bridge`);
+          log.debug(`[WS] Command ${action} → ${devId} sent via bridge`);
           return;
         }
       }
