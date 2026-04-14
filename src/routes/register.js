@@ -40,10 +40,18 @@ router.post("/register", async (req, res) => {
     // Accept expired tokens — server will refresh them via tokenRefresh service
 
     // Resolve Bambu UID for cross-device notification routing.
-    // Trust the JWT locally — avoids slamming Bambu's API on every app cold start
-    // (was causing 429 rate limits at ~500 active users).
+    // 1. Try to decode the JWT locally
+    // 2. If that fails, see if we already have this token stored from a previous register
+    // 3. Last resort: ask Bambu API
     let bambuUid = extractUidFromJwt(accessToken);
-    // Fallback: only call Bambu API if the JWT couldn't be decoded (should be rare)
+    if (!bambuUid) {
+      try {
+        const existing = await User.findOne({ bambu_access_token: accessToken })
+          .select("bambu_uid")
+          .lean();
+        if (existing?.bambu_uid) bambuUid = String(existing.bambu_uid);
+      } catch {}
+    }
     if (!bambuUid) {
       try {
         const axios = require("axios");

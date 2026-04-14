@@ -4,7 +4,7 @@ const userSchema = new Schema(
   {
     expo_push_token: { type: String, required: true, unique: true },
     bambu_uid: { type: String, default: null, index: true },
-    bambu_access_token: { type: String, required: true },
+    bambu_access_token: { type: String, required: true, index: true },
     bambu_refresh_token: { type: String, required: true },
     bambu_token_expires_at: { type: Number, required: true },
     fail_count: { type: Number, default: 0 },
