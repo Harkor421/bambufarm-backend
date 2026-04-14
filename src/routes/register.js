@@ -1,6 +1,7 @@
 const { Router } = require("express");
 const User = require("../db/models/User");
 const log = require("../utils/logger");
+const { extractUidFromJwt } = require("../utils/bambuJwt");
 
 const router = Router();
 
@@ -38,16 +39,21 @@ router.post("/register", async (req, res) => {
     }
     // Accept expired tokens — server will refresh them via tokenRefresh service
 
-    // Resolve Bambu UID for cross-device notification routing
-    let bambuUid = null;
-    try {
-      const axios = require("axios");
-      const profile = await axios.get("https://api.bambulab.com/v1/user-service/my/profile", {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        timeout: 5000,
-      });
-      bambuUid = String(profile.data.uid);
-    } catch {}
+    // Resolve Bambu UID for cross-device notification routing.
+    // Trust the JWT locally — avoids slamming Bambu's API on every app cold start
+    // (was causing 429 rate limits at ~500 active users).
+    let bambuUid = extractUidFromJwt(accessToken);
+    // Fallback: only call Bambu API if the JWT couldn't be decoded (should be rare)
+    if (!bambuUid) {
+      try {
+        const axios = require("axios");
+        const profile = await axios.get("https://api.bambulab.com/v1/user-service/my/profile", {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          timeout: 5000,
+        });
+        bambuUid = String(profile.data.uid);
+      } catch {}
+    }
 
     const update = {
       bambu_access_token: accessToken,

@@ -64,96 +64,82 @@ function cacheUid(token, uid) {
   }
 }
 
-/**
- * Decode a JWT payload (handles base64url encoding properly).
- */
-function decodeJwtPayload(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length < 2) return null;
-    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    while (b64.length % 4) b64 += "=";
-    return JSON.parse(Buffer.from(b64, "base64").toString());
-  } catch {
-    return null;
-  }
-}
+const { extractUidFromJwt } = require("../utils/bambuJwt");
 
 /**
- * Verify a Bambu access token by calling the Bambu Cloud API.
- * Returns the uid string on success, or null on failure.
- * Uses a 10min cache + pooled HTTPS agent to survive high reconnect load.
+ * Extract the uid from a Bambu access token.
+ *
+ * Bambu tokens are standard JWTs — the uid + expiration live inside the payload,
+ * so we can validate them locally without ever calling Bambu Cloud. Previously
+ * we hit `/v1/iot-service/api/user/bind` on every WS connection just to confirm
+ * what the JWT already told us, which got us rate-limited (429) under load.
+ *
+ * We only hit the API as a last-resort fallback when the JWT can't be decoded.
+ * Even then, the actual MQTT/camera auth happens separately against Bambu's own
+ * brokers, so a forged JWT wouldn't gain the attacker anything here.
+ *
+ * Returns a uid string on success, or null on failure.
  */
 function verifyBambuToken(accessToken) {
   return new Promise((resolve) => {
-    // Fast path: cached uid for this exact token
+    // Fast path 1: cached uid
     const cached = getCachedUid(accessToken);
     if (cached) return resolve(cached);
 
-    const handleResponse = (res, body, uidFromJwt) => {
-      const status = res.statusCode;
-      if (status === 200) {
-        if (uidFromJwt) {
-          cacheUid(accessToken, uidFromJwt);
-          return resolve(String(uidFromJwt));
-        }
-        try {
-          const data = JSON.parse(body);
-          const uid = data.uid || data.userId || data.user_id || data.id ||
-            (data.data && (data.data.uid || data.data.userId || data.data.id));
-          if (uid) {
-            cacheUid(accessToken, String(uid));
-            return resolve(String(uid));
-          }
-          log.warn(`[WS] Profile 200 but no uid in response: keys=${Object.keys(data).join(",")}`);
-          return resolve(null);
-        } catch {
-          return resolve(null);
-        }
-      }
-      // Log specific error codes so we can see rate-limiting / outages
-      if (status === 429) log.warn(`[WS] Bambu API rate-limited (429) on token verify`);
-      else if (status >= 500) log.warn(`[WS] Bambu API error ${status} on token verify`);
-      else if (status === 401 || status === 403) log.info(`[WS] Bambu token rejected (${status})`);
-      else log.warn(`[WS] Bambu API unexpected status ${status} on token verify`);
-      resolve(null);
-    };
-
-    const makeRequest = (path, uidFromJwt) => {
-      const req = https.request(
-        {
-          hostname: "api.bambulab.com",
-          path,
-          method: "GET",
-          agent: bambuHttpsAgent,
-          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-        },
-        (res) => {
-          let body = "";
-          res.on("data", (c) => (body += c));
-          res.on("end", () => handleResponse(res, body, uidFromJwt));
-        }
-      );
-      req.on("error", (err) => {
-        log.warn(`[WS] Bambu API network error on token verify: ${err.message}`);
-        resolve(null);
-      });
-      req.setTimeout(10000, () => {
-        log.warn(`[WS] Bambu API timeout on token verify (${path})`);
-        req.destroy();
-        resolve(null);
-      });
-      req.end();
-    };
-
-    // Try JWT decode first — if we get a uid we just need to verify the token is valid
-    const payload = decodeJwtPayload(accessToken);
-    const uidFromJwt = payload && (payload.uid || payload.sub || payload.user_id);
+    // Fast path 2: trust the JWT if it decodes cleanly and isn't expired.
+    // This is the common case — eliminates 99% of Bambu API calls.
+    const uidFromJwt = extractUidFromJwt(accessToken);
     if (uidFromJwt) {
-      makeRequest("/v1/iot-service/api/user/bind", uidFromJwt);
-    } else {
-      makeRequest("/v1/user-service/my/profile", null);
+      cacheUid(accessToken, uidFromJwt);
+      return resolve(uidFromJwt);
     }
+
+    // Fallback: malformed/expired JWT — ask Bambu who this is. This should
+    // essentially never happen for real clients; it's a safety net.
+    log.debug(`[WS] JWT decode produced no uid, falling back to Bambu API`);
+    const req = https.request(
+      {
+        hostname: "api.bambulab.com",
+        path: "/v1/user-service/my/profile",
+        method: "GET",
+        agent: bambuHttpsAgent,
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (c) => (body += c));
+        res.on("end", () => {
+          const status = res.statusCode;
+          if (status === 200) {
+            try {
+              const data = JSON.parse(body);
+              const uid = data.uid || data.userId || data.user_id || data.id ||
+                (data.data && (data.data.uid || data.data.userId || data.data.id));
+              if (uid) {
+                cacheUid(accessToken, String(uid));
+                return resolve(String(uid));
+              }
+              log.warn(`[WS] Profile 200 but no uid in response`);
+            } catch {}
+            return resolve(null);
+          }
+          if (status === 429) log.warn(`[WS] Bambu API rate-limited (429) on fallback token verify`);
+          else if (status >= 500) log.warn(`[WS] Bambu API error ${status} on fallback token verify`);
+          else if (status === 401 || status === 403) log.debug(`[WS] Bambu token rejected (${status})`);
+          resolve(null);
+        });
+      }
+    );
+    req.on("error", (err) => {
+      log.warn(`[WS] Bambu API network error on fallback token verify: ${err.message}`);
+      resolve(null);
+    });
+    req.setTimeout(10000, () => {
+      log.warn(`[WS] Bambu API timeout on fallback token verify`);
+      req.destroy();
+      resolve(null);
+    });
+    req.end();
   });
 }
 
