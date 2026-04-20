@@ -191,18 +191,24 @@ class PrinterMqttConnection {
       }
     }
 
-    // Send LA progress update — throttled to once per 60s per printer to stay within Apple's budget
-    const pctChanged = p.mc_percent != null && p.mc_percent !== (prev.mc_percent ?? -1);
-    if (merged.gcode_state === "RUNNING" && pctChanged && merged.mc_percent != null) {
-      const now = Date.now();
-      const lastUpdate = this._lastProgressUpdate?.get(devId) || 0;
-      if (now - lastUpdate >= 150000) {
-        if (!this._lastProgressUpdate) this._lastProgressUpdate = new Map();
-        this._lastProgressUpdate.set(devId, now);
+    // Send LA progress update at 20% boundaries only (0%, 20%, 40%, 60%, 80%, 100%).
+    // Apple's APNs budget for Live Activities is ~4-5 priority-10 updates/hour — a
+    // 24h print on time-based polling would blow that budget 100x over and get the
+    // LA silenced. Progress-based updates = ~6 per print, well within budget.
+    if (merged.gcode_state === "RUNNING" && merged.mc_percent != null) {
+      const bucket = Math.floor(merged.mc_percent / 20); // 0..5
+      if (!this._lastProgressBucket) this._lastProgressBucket = new Map();
+      const lastBucket = this._lastProgressBucket.get(devId);
+      if (lastBucket == null || bucket > lastBucket) {
+        this._lastProgressBucket.set(devId, bucket);
         try {
           if (this.onProgressUpdate) await this.onProgressUpdate(devId, merged);
         } catch (err) { log.error(`[MQTT] onProgressUpdate error for ${devId}: ${err.message}`); }
       }
+    } else if (merged.gcode_state && merged.gcode_state !== "RUNNING" && merged.gcode_state !== "PAUSE") {
+      // Print ended (FINISH/IDLE/FAILED) — reset so the next print on this printer
+      // starts the bucket progression from 0 again.
+      if (this._lastProgressBucket) this._lastProgressBucket.delete(devId);
     }
   }
 
