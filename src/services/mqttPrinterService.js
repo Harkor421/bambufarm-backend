@@ -191,6 +191,14 @@ class PrinterMqttConnection {
       }
     }
 
+    // Stash the latest frame if we're in the pre-end window (95-99% progress).
+    // The plate lowers AT FINISH, so grabbing the frame then shows empty air —
+    // we need a frame from shortly before the end for training/broadcast use.
+    try {
+      const { maybeStashPreEndFrame } = require("./trainingDataCapture");
+      maybeStashPreEndFrame(this.bambuUid, devId, merged);
+    } catch {}
+
     // Send LA progress update at 20% boundaries only (0%, 20%, 40%, 60%, 80%, 100%).
     // Apple's APNs budget for Live Activities is ~4-5 priority-10 updates/hour — a
     // 24h print on time-based polling would blow that budget 100x over and get the
@@ -483,8 +491,19 @@ class MqttPrinterService {
 
                 if (msg) {
                   await new Promise(r => setTimeout(r, 2000));
-                  // Get frame via getter (avoids circular dep with wsManager)
-                  const frame = mqttService._getFrame?.(bambuUid, devId) || null;
+                  // For "finished" (success) broadcasts, prefer the pre-end frame
+                  // captured at 95-99% progress — otherwise the camera shows the
+                  // plate already lowered, which isn't what Tecnoprints wants to see.
+                  const isFinishedMsg = gcState === "FINISH" || (gcState === "IDLE" && prevGcodeState === "RUNNING" && pct >= 90);
+                  let frame = null;
+                  if (isFinishedMsg) {
+                    try {
+                      const { getPreEndFrame } = require("./trainingDataCapture");
+                      frame = getPreEndFrame(bambuUid, devId);
+                    } catch {}
+                  }
+                  // Fallback for non-success messages OR if we don't have a pre-end frame
+                  if (!frame) frame = mqttService._getFrame?.(bambuUid, devId) || null;
                   broadcastWithImage(msg, frame).catch(() => {});
                 }
               }
@@ -641,6 +660,22 @@ class MqttPrinterService {
     if (effectivePrev && gcodeState !== effectivePrev) {
       const { buildNotification } = require("./notificationBuilder");
       const { dispatchLiveActivity } = require("./liveActivityDispatcher");
+
+      // Fire-and-forget: capture a training sample if the transition is interesting
+      // and the user has BambuBridge streaming (cached frame available).
+      // This doesn't block the notification pipeline.
+      try {
+        const { captureTransition } = require("./trainingDataCapture");
+        captureTransition({
+          bambuUid: user.bambu_uid,
+          printerId: devId,
+          printerName,
+          gcodeState,
+          effectivePrev,
+          state,
+          userId,
+        });
+      } catch {}
 
       let notification = buildNotification(gcodeState, effectivePrev, state, devId, printerName);
 
