@@ -184,6 +184,13 @@ class WsManager {
     this._demandGrace = new Map();
     this._DEMAND_GRACE_MS = 90 * 1000;
 
+    // Admin-camera demand: when the admin opens the cameras tab, we force ALL
+    // connected bridges to stream ALL their cameras. The endpoint refreshes this
+    // timestamp every poll (every ~8s), so it stays active while admin is viewing
+    // and naturally lapses ~30s after they close the tab.
+    this._adminCameraDemandUntil = 0;
+    this._ADMIN_CAMERA_DEMAND_MS = 30 * 1000;
+
     // Listen for state changes to update bridge camera demand
     const eventBus = require("./eventBus");
     eventBus.on("printer:stateChange", ({ bambuUid }) => {
@@ -559,8 +566,10 @@ class WsManager {
   _getDemandedPrinters(userId) {
     const demanded = new Set();
     const now = Date.now();
+    const adminViewing = now < this._adminCameraDemandUntil;
 
-    // Always stream cameras for printers that are currently printing
+    // Always stream cameras for printers that are currently printing — and ALL
+    // printers known by this user when admin is viewing the cameras tab.
     if (this._printerStateGetter) {
       try {
         const states = this._printerStateGetter(userId);
@@ -569,8 +578,10 @@ class WsManager {
             state.gcode_state === "RUNNING" ||
             state.gcode_state === "PAUSE" ||
             state.gcode_state === "PREPARE";
-          if (active) {
+          if (active || adminViewing) {
             demanded.add(devId);
+          }
+          if (active) {
             // Refresh grace window so this printer stays demanded for 90s after it goes idle
             this._demandGrace.set(`${userId}:${devId}`, now + this._DEMAND_GRACE_MS);
           }
@@ -613,6 +624,9 @@ class WsManager {
    * Sweep grace entries that have expired and notify bridges if the set shrank.
    * Runs periodically because a printer going idle may not trigger any further
    * state-change events — we need an independent tick to drop it from demand.
+   *
+   * Also handles admin-camera-demand expiry: when the admin stops viewing the
+   * cameras tab, all bridges need to be told to stop streaming idle printers.
    */
   _sweepDemandGrace() {
     const now = Date.now();
@@ -624,6 +638,16 @@ class WsManager {
         affectedUsers.add(uid);
       }
     }
+
+    // Detect admin-demand expiry: if it WAS active and now isn't, notify all bridges
+    // so they drop any idle printers we previously force-demanded.
+    if (this._adminCameraDemandUntil > 0 && now >= this._adminCameraDemandUntil) {
+      this._adminCameraDemandUntil = 0;
+      if (this.bridges) {
+        for (const uid of this.bridges.keys()) affectedUsers.add(uid);
+      }
+    }
+
     for (const uid of affectedUsers) this._notifyBridgeDemand(uid);
   }
 
@@ -658,6 +682,24 @@ class WsManager {
   isBridgeConnected(userId) {
     const set = this.bridges.get(userId);
     return set ? set.size > 0 : false;
+  }
+
+  /**
+   * Called by the admin metrics endpoint when the cameras tab is being viewed.
+   * Refreshes the admin-demand timestamp and immediately notifies all connected
+   * bridges to start streaming all their cameras.
+   *
+   * The timestamp auto-expires ~30s later, so cameras stop streaming naturally
+   * once the admin closes the tab (the next demand update will exclude idle printers).
+   */
+  markAdminCameraDemand() {
+    const wasActive = Date.now() < this._adminCameraDemandUntil;
+    this._adminCameraDemandUntil = Date.now() + this._ADMIN_CAMERA_DEMAND_MS;
+    // If admin demand JUST became active, push a fresh demand update to all bridges
+    // so they start streaming everything immediately (don't wait for the next state change).
+    if (!wasActive && this.bridges) {
+      for (const uid of this.bridges.keys()) this._notifyBridgeDemand(uid);
+    }
   }
 
   /**

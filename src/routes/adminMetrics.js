@@ -389,6 +389,13 @@ router.get("/admin/metrics/bridges", requireAdmin, async (_req, res) => {
 router.get("/admin/metrics/cameras", requireAdmin, async (_req, res) => {
   try {
     const wsManager = require("../services/wsManager");
+
+    // Tell bridges to stream EVERY camera while the admin is viewing this tab.
+    // The frontend polls every ~8s; this re-arms a 30s window so as long as
+    // the admin keeps viewing, bridges keep streaming. Naturally lapses ~30s
+    // after they navigate away.
+    wsManager.markAdminCameraDemand();
+
     const items = [];
 
     if (wsManager.latestFrames) {

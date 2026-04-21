@@ -36,11 +36,15 @@ app.use("/api/public", (req, res, next) => {
 // CORS for admin metrics — accessed from the WhatsApp admin frontend (different origin).
 // Auth is enforced by the admin password middleware on each route; CORS is just permission
 // for the browser to read the response.
+//
+// Cross-Origin-Resource-Policy must be "cross-origin" so <img> tags on a different
+// domain can load camera frames (Helmet defaults to "same-origin" which blocks them).
 app.use("/api/admin/metrics", (req, res, next) => {
   res.set({
     "Access-Control-Allow-Origin": req.headers.origin || "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type,X-Admin-Password",
+    "Cross-Origin-Resource-Policy": "cross-origin",
     "Vary": "Origin",
   });
   if (req.method === "OPTIONS") return res.sendStatus(204);
