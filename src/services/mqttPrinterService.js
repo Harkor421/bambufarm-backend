@@ -547,11 +547,18 @@ class MqttPrinterService {
           this.connections.set(id, conn);
           conn.connect();
         } catch (err) {
-          if (err.response?.status === 429) {
+          const status = err.response?.status;
+          if (status === 429) {
             // Rate limited — exponential backoff (10s, 20s, 40s, max 60s)
             log.warn(`[MQTT] Rate limited setting up user ${id}, waiting ${rateLimitBackoff / 1000}s...`);
             await new Promise(r => setTimeout(r, rateLimitBackoff));
             rateLimitBackoff = Math.min(rateLimitBackoff * 2, 60000);
+          } else if (status === 401 || status === 403) {
+            // Token is dead (user uninstalled, refresh token revoked). Increment
+            // fail_count so we stop retrying them every cycle; after 5 failures
+            // they get excluded from the user query entirely.
+            await User.updateOne({ _id: user._id }, { $inc: { fail_count: 1 } }).catch(() => {});
+            log.debug(`[MQTT] ${status} for user ${id} (token dead) — incrementing fail_count`);
           } else {
             log.error(`[MQTT] Failed to set up user ${id}: ${err.message}`);
           }
