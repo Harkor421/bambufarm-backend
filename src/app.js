@@ -66,9 +66,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// Security headers (skip for public routes)
+// Security headers (skip for public + admin metrics routes — they need cross-origin
+// image loads which Helmet's default CORP=same-origin blocks).
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/public/")) return next();
+  if (req.path.startsWith("/api/admin/metrics/")) return next();
   helmet()(req, res, next);
 });
 
