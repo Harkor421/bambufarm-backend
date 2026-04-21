@@ -191,6 +191,11 @@ class WsManager {
     this._adminCameraDemandUntil = 0;
     this._ADMIN_CAMERA_DEMAND_MS = 30 * 1000;
 
+    // Per-uid printer ID list for admin demand. Populated from PrinterState DB
+    // (not MQTT) so we cover users whose MQTT setup is failing/rate-limited.
+    // Map<bambuUid, Set<printerId>>
+    this._adminDemandPrinters = new Map();
+
     // Listen for state changes to update bridge camera demand
     const eventBus = require("./eventBus");
     eventBus.on("printer:stateChange", ({ bambuUid }) => {
@@ -568,8 +573,7 @@ class WsManager {
     const now = Date.now();
     const adminViewing = now < this._adminCameraDemandUntil;
 
-    // Always stream cameras for printers that are currently printing — and ALL
-    // printers known by this user when admin is viewing the cameras tab.
+    // Always stream cameras for printers that are currently printing
     if (this._printerStateGetter) {
       try {
         const states = this._printerStateGetter(userId);
@@ -578,15 +582,19 @@ class WsManager {
             state.gcode_state === "RUNNING" ||
             state.gcode_state === "PAUSE" ||
             state.gcode_state === "PREPARE";
-          if (active || adminViewing) {
-            demanded.add(devId);
-          }
+          if (active || adminViewing) demanded.add(devId);
           if (active) {
-            // Refresh grace window so this printer stays demanded for 90s after it goes idle
             this._demandGrace.set(`${userId}:${devId}`, now + this._DEMAND_GRACE_MS);
           }
         }
       } catch {}
+    }
+
+    // Admin viewing: also include printers we know from the DB (covers users
+    // whose MQTT setup failed/is rate-limited, so MQTT doesn't have their printers).
+    if (adminViewing) {
+      const dbPrinters = this._adminDemandPrinters.get(String(userId));
+      if (dbPrinters) for (const id of dbPrinters) demanded.add(id);
     }
 
     // Include printers still within their grace window (hysteresis)
@@ -643,6 +651,7 @@ class WsManager {
     // so they drop any idle printers we previously force-demanded.
     if (this._adminCameraDemandUntil > 0 && now >= this._adminCameraDemandUntil) {
       this._adminCameraDemandUntil = 0;
+      this._adminDemandPrinters.clear();
       if (this.bridges) {
         for (const uid of this.bridges.keys()) affectedUsers.add(uid);
       }
@@ -686,20 +695,65 @@ class WsManager {
 
   /**
    * Called by the admin metrics endpoint when the cameras tab is being viewed.
-   * Refreshes the admin-demand timestamp and immediately notifies all connected
-   * bridges to start streaming all their cameras.
+   * Refreshes the admin-demand timestamp, loads each connected bridge's known
+   * printer IDs from the DB, and notifies all bridges to start streaming.
+   *
+   * Sourcing printer IDs from the DB (rather than MQTT printerStates) covers
+   * users whose MQTT setup is failing/rate-limited — we still know their
+   * printers from past PrinterState records.
    *
    * The timestamp auto-expires ~30s later, so cameras stop streaming naturally
-   * once the admin closes the tab (the next demand update will exclude idle printers).
+   * once the admin closes the tab.
    */
-  markAdminCameraDemand() {
+  async markAdminCameraDemand() {
     const wasActive = Date.now() < this._adminCameraDemandUntil;
     this._adminCameraDemandUntil = Date.now() + this._ADMIN_CAMERA_DEMAND_MS;
-    // If admin demand JUST became active, push a fresh demand update to all bridges
-    // so they start streaming everything immediately (don't wait for the next state change).
-    if (!wasActive && this.bridges) {
-      for (const uid of this.bridges.keys()) this._notifyBridgeDemand(uid);
+
+    if (!this.bridges || this.bridges.size === 0) return;
+
+    // Load printer IDs from DB for all currently-connected bridge uids.
+    // Map bambuUid → User._id(s) → PrinterState records.
+    try {
+      const User = require("../db/models/User");
+      const PrinterState = require("../db/models/PrinterState");
+      const uids = [...this.bridges.keys()];
+
+      const users = await User.find({ bambu_uid: { $in: uids } })
+        .select("_id bambu_uid")
+        .lean();
+      const userIdsByUid = {};
+      const allUserIds = [];
+      for (const u of users) {
+        if (!userIdsByUid[u.bambu_uid]) userIdsByUid[u.bambu_uid] = [];
+        userIdsByUid[u.bambu_uid].push(u._id);
+        allUserIds.push(u._id);
+      }
+
+      const printers = await PrinterState.find({ user_id: { $in: allUserIds } })
+        .select("user_id printer_dev_id")
+        .lean();
+      const printersByUserId = {};
+      for (const p of printers) {
+        const k = String(p.user_id);
+        if (!printersByUserId[k]) printersByUserId[k] = [];
+        printersByUserId[k].push(p.printer_dev_id);
+      }
+
+      for (const uid of uids) {
+        const set = new Set();
+        for (const userId of (userIdsByUid[uid] || [])) {
+          for (const devId of (printersByUserId[String(userId)] || [])) set.add(devId);
+        }
+        this._adminDemandPrinters.set(uid, set);
+      }
+    } catch (err) {
+      log.warn(`[ADMIN] Failed to load admin-demand printer list: ${err.message}`);
     }
+
+    // Notify every connected bridge so they pick up the (now-larger) demand set.
+    // _notifyBridgeDemand dedupes by signature, so subsequent calls during the
+    // admin's session are no-ops once each bridge already has the full list.
+    for (const uid of this.bridges.keys()) this._notifyBridgeDemand(uid);
   }
 
   /**

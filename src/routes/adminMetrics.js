@@ -394,7 +394,10 @@ router.get("/admin/metrics/cameras", requireAdmin, async (_req, res) => {
     // The frontend polls every ~8s; this re-arms a 30s window so as long as
     // the admin keeps viewing, bridges keep streaming. Naturally lapses ~30s
     // after they navigate away.
-    wsManager.markAdminCameraDemand();
+    // Fire-and-forget — DB lookup happens in background; we don't block the
+    // response on it. First poll may not show frames from newly-demanded bridges
+    // (no time for them to start streaming), but subsequent polls will.
+    wsManager.markAdminCameraDemand().catch(() => {});
 
     const items = [];
 
