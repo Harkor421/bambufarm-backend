@@ -1,0 +1,397 @@
+const { Router } = require("express");
+const User = require("../db/models/User");
+const PrinterState = require("../db/models/PrinterState");
+const BridgeSession = require("../db/models/BridgeSession");
+const requireAdmin = require("../middleware/adminAuth");
+const log = require("../utils/logger");
+
+const router = Router();
+
+/**
+ * Recent state-change activity log (in-memory, last N events).
+ * Populated by mqttPrinterService via eventBus (see _attachActivityLog below).
+ */
+const RECENT_ACTIVITY_MAX = 200;
+const recentActivity = [];
+
+function attachActivityLog() {
+  try {
+    const eventBus = require("../services/eventBus");
+    eventBus.on("printer:stateChange", ({ bambuUid, devId, state, prev }) => {
+      recentActivity.unshift({
+        at: new Date().toISOString(),
+        bambuUid: String(bambuUid || ""),
+        printerId: devId,
+        from: prev || "?",
+        to: state?.gcode_state || "?",
+        progress: state?.mc_percent ?? null,
+        jobTitle: state?.subtask_name || null,
+      });
+      if (recentActivity.length > RECENT_ACTIVITY_MAX) recentActivity.length = RECENT_ACTIVITY_MAX;
+    });
+  } catch (err) {
+    log.warn(`[ADMIN] Could not attach activity log listener: ${err.message}`);
+  }
+}
+attachActivityLog();
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * GET /api/admin/metrics/overview
+ *
+ * High-level dashboard numbers: users, bridges, currently active prints, etc.
+ * ───────────────────────────────────────────────────────────────────────── */
+router.get("/admin/metrics/overview", requireAdmin, async (_req, res) => {
+  try {
+    const wsManager = require("../services/wsManager");
+    const mqttService = require("../services/mqttPrinterService");
+
+    // Window helpers
+    const now = Date.now();
+    const mins = (m) => new Date(now - m * 60_000);
+    const hrs = (h) => new Date(now - h * 60 * 60_000);
+    const days = (d) => new Date(now - d * 24 * 60 * 60_000);
+
+    // ── User counts ─────────────────────────────────────────────
+    const totalUsers = await User.countDocuments();
+    const uniqueAccounts = await User.distinct("bambu_uid", { bambu_uid: { $ne: null } });
+    const failedUsers = await User.countDocuments({ fail_count: { $gte: 5 } });
+    const usersLastDay = await User.countDocuments({ updatedAt: { $gte: days(1) } });
+    const usersLast7d = await User.countDocuments({ updatedAt: { $gte: days(7) } });
+
+    // ── Bridge stats (live + historical) ────────────────────────
+    let bridgesConnected = 0;
+    const connectedBridgeUids = new Set();
+    if (wsManager.bridges) {
+      for (const [uid, set] of wsManager.bridges) {
+        bridgesConnected += set.size || 0;
+        if ((set.size || 0) > 0) connectedBridgeUids.add(uid);
+      }
+    }
+    const bridgesLastHour = (await BridgeSession.distinct("bambu_uid", { connected_at: { $gte: hrs(1) } })).length;
+    const bridgesLast24h = (await BridgeSession.distinct("bambu_uid", { connected_at: { $gte: hrs(24) } })).length;
+    const bridgesEverUsed = (await BridgeSession.distinct("bambu_uid")).length;
+
+    // ── App WebSocket clients ───────────────────────────────────
+    let appClientsConnected = 0;
+    let uniqueAppUids = 0;
+    if (wsManager.appClients) {
+      for (const [, set] of wsManager.appClients) appClientsConnected += set.size || 0;
+      uniqueAppUids = wsManager.appClients.size;
+    }
+
+    // ── MQTT printer connections ────────────────────────────────
+    let mqttConnections = 0;
+    let mqttConnected = 0;
+    if (mqttService.connections) {
+      mqttConnections = mqttService.connections.size;
+      for (const conn of mqttService.connections.values()) {
+        if (conn.connected) mqttConnected++;
+      }
+    }
+
+    // ── Print states ────────────────────────────────────────────
+    const totalPrinters = await PrinterState.countDocuments();
+    const printing = await PrinterState.countDocuments({ notif_status: "printing" });
+    const paused = await PrinterState.countDocuments({ notif_status: "paused" });
+    const idle = await PrinterState.countDocuments({ notif_status: "idle" });
+
+    // Recent state transitions
+    const transitionsLastHour = recentActivity.filter((a) => Date.parse(a.at) >= hrs(1).getTime()).length;
+    const transitionsLast24h = recentActivity.filter((a) => Date.parse(a.at) >= hrs(24).getTime()).length;
+
+    res.json({
+      ok: true,
+      timestamp: new Date().toISOString(),
+      users: {
+        totalRegistered: totalUsers,
+        uniqueBambuAccounts: uniqueAccounts.length,
+        failed: failedUsers,
+        activeLastDay: usersLastDay,
+        activeLast7d: usersLast7d,
+      },
+      bridges: {
+        currentlyConnected: bridgesConnected,
+        uniqueUsersConnected: connectedBridgeUids.size,
+        activeLastHour: bridgesLastHour,
+        activeLast24h: bridgesLast24h,
+        everUsed: bridgesEverUsed,
+      },
+      app: {
+        wsConnections: appClientsConnected,
+        uniqueUsers: uniqueAppUids,
+      },
+      mqtt: {
+        totalConnections: mqttConnections,
+        connected: mqttConnected,
+      },
+      printers: {
+        total: totalPrinters,
+        printing,
+        paused,
+        idle,
+      },
+      activity: {
+        transitionsLastHour,
+        transitionsLast24h,
+        bufferSize: recentActivity.length,
+      },
+    });
+  } catch (err) {
+    log.error(`[ADMIN] Overview error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * GET /api/admin/metrics/printers?status=printing&limit=200
+ *
+ * List every printer with its current state, owner, progress, ETA.
+ * Supports filtering by status and pagination via limit/offset.
+ * ───────────────────────────────────────────────────────────────────────── */
+router.get("/admin/metrics/printers", requireAdmin, async (req, res) => {
+  try {
+    const status = req.query.status; // "printing" | "paused" | "idle" | undefined
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const offset = Number(req.query.offset) || 0;
+
+    const query = {};
+    if (status) query.notif_status = status;
+
+    const total = await PrinterState.countDocuments(query);
+
+    // Sort: printing first, then paused, then by most recent update
+    const printers = await PrinterState.find(query)
+      .sort({ notif_status: 1, updatedAt: -1 })
+      .skip(offset)
+      .limit(limit)
+      .lean();
+
+    // Hydrate with bambu_uid + expo_push_token tail (for cross-referencing)
+    const userIds = [...new Set(printers.map((p) => String(p.user_id)))];
+    const users = await User.find({ _id: { $in: userIds } })
+      .select("_id bambu_uid expo_push_token createdAt")
+      .lean();
+    const userMap = Object.fromEntries(users.map((u) => [String(u._id), u]));
+
+    // Pull live MQTT state for currently-connected printers (overlays DB state)
+    const mqttService = require("../services/mqttPrinterService");
+    const liveStates = new Map();
+    if (mqttService.connections) {
+      for (const conn of mqttService.connections.values()) {
+        if (!conn.printerStates) continue;
+        for (const [devId, state] of conn.printerStates) {
+          liveStates.set(devId, {
+            gcode_state: state.gcode_state,
+            mc_percent: state.mc_percent,
+            mc_remaining_time: state.mc_remaining_time,
+            subtask_name: state.subtask_name,
+            layer_num: state.layer_num,
+            total_layer_num: state.total_layer_num,
+            nozzle_temper: state.nozzle_temper,
+            bed_temper: state.bed_temper,
+            hms: Array.isArray(state.hms) ? state.hms.length : 0,
+          });
+        }
+      }
+    }
+
+    const items = printers.map((p) => {
+      const user = userMap[String(p.user_id)] || null;
+      const live = liveStates.get(p.printer_dev_id) || null;
+      return {
+        printerId: p.printer_dev_id,
+        printerName: p.printer_name,
+        status: p.notif_status,
+        jobTitle: p.notif_job_title || p.last_job_title || null,
+        startedAt: p.notif_started_at,
+        costTimeSec: p.notif_cost_time_sec,
+        pausedAt: p.notif_paused_at,
+        progressAtPause: p.notif_frozen_progress_pct,
+        remainingAtPause: p.notif_frozen_remaining_sec,
+        updatedAt: p.updatedAt,
+        owner: user ? {
+          userId: String(user._id),
+          bambuUid: user.bambu_uid,
+          pushTokenTail: user.expo_push_token ? user.expo_push_token.slice(-12) : null,
+          registeredAt: user.createdAt,
+        } : null,
+        live, // live MQTT snapshot (null if MQTT not connected for this printer)
+      };
+    });
+
+    res.json({ ok: true, total, limit, offset, items });
+  } catch (err) {
+    log.error(`[ADMIN] Printers error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * GET /api/admin/metrics/users?limit=100&hasBridge=1
+ *
+ * List users with summary info. Optional filter: hasBridge=1 → only users
+ * who have ever connected a BambuBridge.
+ * ───────────────────────────────────────────────────────────────────────── */
+router.get("/admin/metrics/users", requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const offset = Number(req.query.offset) || 0;
+    const hasBridge = req.query.hasBridge === "1";
+
+    let bridgeUids = null;
+    if (hasBridge) {
+      bridgeUids = new Set(await BridgeSession.distinct("bambu_uid"));
+    }
+
+    const query = {};
+    if (hasBridge) query.bambu_uid = { $in: [...bridgeUids] };
+
+    const total = await User.countDocuments(query);
+    const users = await User.find(query)
+      .sort({ updatedAt: -1 })
+      .skip(offset)
+      .limit(limit)
+      .select("_id bambu_uid expo_push_token bambu_token_expires_at fail_count la_push_to_start_token createdAt updatedAt")
+      .lean();
+
+    // Bridge counts per user (for the visible page)
+    const bambuUids = users.map((u) => u.bambu_uid).filter(Boolean);
+    const bridgeAgg = await BridgeSession.aggregate([
+      { $match: { bambu_uid: { $in: bambuUids } } },
+      { $group: {
+        _id: "$bambu_uid",
+        sessionCount: { $sum: 1 },
+        lastConnected: { $max: "$connected_at" },
+        anyOpen: { $sum: { $cond: [{ $eq: ["$disconnected_at", null] }, 1, 0] } },
+      }},
+    ]);
+    const bridgeMap = Object.fromEntries(bridgeAgg.map((b) => [b._id, b]));
+
+    // Printer counts per user (for the visible page)
+    const userIds = users.map((u) => u._id);
+    const printerAgg = await PrinterState.aggregate([
+      { $match: { user_id: { $in: userIds } } },
+      { $group: {
+        _id: "$user_id",
+        printerCount: { $sum: 1 },
+        printingCount: { $sum: { $cond: [{ $eq: ["$notif_status", "printing"] }, 1, 0] } },
+        pausedCount: { $sum: { $cond: [{ $eq: ["$notif_status", "paused"] }, 1, 0] } },
+      }},
+    ]);
+    const printerMap = Object.fromEntries(printerAgg.map((p) => [String(p._id), p]));
+
+    // Live: which bambuUids currently have a bridge WS open?
+    const wsManager = require("../services/wsManager");
+    const liveBridgeUids = new Set();
+    if (wsManager.bridges) {
+      for (const [uid, set] of wsManager.bridges) {
+        if ((set.size || 0) > 0) liveBridgeUids.add(uid);
+      }
+    }
+
+    const items = users.map((u) => {
+      const bridge = bridgeMap[u.bambu_uid] || null;
+      const printer = printerMap[String(u._id)] || null;
+      return {
+        userId: String(u._id),
+        bambuUid: u.bambu_uid,
+        pushTokenTail: u.expo_push_token ? u.expo_push_token.slice(-12) : null,
+        tokenExpiresAt: u.bambu_token_expires_at,
+        failCount: u.fail_count,
+        hasLiveActivities: !!u.la_push_to_start_token,
+        registeredAt: u.createdAt,
+        lastSeenAt: u.updatedAt,
+        bridge: bridge ? {
+          sessionCount: bridge.sessionCount,
+          lastConnected: bridge.lastConnected,
+          currentlyConnected: liveBridgeUids.has(u.bambu_uid),
+        } : { sessionCount: 0, lastConnected: null, currentlyConnected: false },
+        printers: printer ? {
+          total: printer.printerCount,
+          printing: printer.printingCount,
+          paused: printer.pausedCount,
+        } : { total: 0, printing: 0, paused: 0 },
+      };
+    });
+
+    res.json({ ok: true, total, limit, offset, items });
+  } catch (err) {
+    log.error(`[ADMIN] Users error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * GET /api/admin/metrics/bridges
+ *
+ * Currently-connected bridges with uid, connected-since, printer count.
+ * ───────────────────────────────────────────────────────────────────────── */
+router.get("/admin/metrics/bridges", requireAdmin, async (_req, res) => {
+  try {
+    const wsManager = require("../services/wsManager");
+    const items = [];
+
+    if (wsManager.bridges) {
+      const uids = [...wsManager.bridges.keys()];
+      // Find the matching open BridgeSession for each connected uid
+      const openSessions = await BridgeSession.find({
+        bambu_uid: { $in: uids },
+        disconnected_at: null,
+      })
+        .sort({ connected_at: -1 })
+        .lean();
+      const sessionMap = {};
+      for (const s of openSessions) {
+        if (!sessionMap[s.bambu_uid]) sessionMap[s.bambu_uid] = s;
+      }
+
+      // Look up the user record(s) for each uid
+      const users = await User.find({ bambu_uid: { $in: uids } })
+        .select("_id bambu_uid expo_push_token createdAt")
+        .lean();
+      const userMap = {};
+      for (const u of users) {
+        if (!userMap[u.bambu_uid]) userMap[u.bambu_uid] = u;
+      }
+
+      for (const [uid, set] of wsManager.bridges) {
+        const session = sessionMap[uid];
+        const user = userMap[uid];
+        items.push({
+          bambuUid: uid,
+          connectionCount: set.size || 0,
+          connectedAt: session ? session.connected_at : null,
+          owner: user ? {
+            userId: String(user._id),
+            pushTokenTail: user.expo_push_token ? user.expo_push_token.slice(-12) : null,
+            registeredAt: user.createdAt,
+          } : null,
+        });
+      }
+    }
+
+    items.sort((a, b) => (b.connectedAt ? Date.parse(b.connectedAt) : 0) - (a.connectedAt ? Date.parse(a.connectedAt) : 0));
+
+    res.json({ ok: true, total: items.length, items });
+  } catch (err) {
+    log.error(`[ADMIN] Bridges error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * GET /api/admin/metrics/activity?limit=100
+ *
+ * Recent state transitions (live feed). In-memory ring buffer, last 200.
+ * ───────────────────────────────────────────────────────────────────────── */
+router.get("/admin/metrics/activity", requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, RECENT_ACTIVITY_MAX);
+    res.json({ ok: true, total: recentActivity.length, items: recentActivity.slice(0, limit) });
+  } catch (err) {
+    log.error(`[ADMIN] Activity error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+module.exports = router;

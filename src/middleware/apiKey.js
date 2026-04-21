@@ -5,6 +5,9 @@ const { apiKey: API_KEY } = require("../config");
 function requireApiKey(req, res, next) {
   if (req.path === "/api/health") return next();
   if (req.path.startsWith("/api/public/")) return next();
+  // Admin metrics endpoints are protected by adminAuth middleware (X-Admin-Password)
+  // — no need for the global API key, which we don't want to ship to a browser app.
+  if (req.path.startsWith("/api/admin/metrics/")) return next();
 
   if (!API_KEY) {
     log.error("[AUTH] API_KEY env var not set — rejecting request");

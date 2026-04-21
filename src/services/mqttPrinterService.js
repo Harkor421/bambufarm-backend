@@ -447,8 +447,8 @@ class MqttPrinterService {
             accessToken,
             printerIds,
             onStateChange: async (devId, state, prevGcodeState) => {
-              // Notify other services of state change (bridge demand, etc.)
-              require("./eventBus").emit("printer:stateChange", { bambuUid, devId, state });
+              // Notify other services of state change (bridge demand, activity log, etc.)
+              require("./eventBus").emit("printer:stateChange", { bambuUid, devId, state, prev: prevGcodeState });
 
               // Send to ALL user records with the same Bambu UID
               const allSameAccount = await User.find({

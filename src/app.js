@@ -11,6 +11,7 @@ const printerControlRoutes = require("./routes/printerControl");
 const publicCameraRoutes = require("./routes/publicCamera");
 const printVisionRoutes = require("./routes/printVision");
 const adminRoutes = require("./routes/admin");
+const adminMetricsRoutes = require("./routes/adminMetrics");
 
 const app = express();
 
@@ -27,6 +28,20 @@ app.use("/api/public", (req, res, next) => {
     "Access-Control-Allow-Methods": "GET,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Cross-Origin-Resource-Policy": "cross-origin",
+  });
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// CORS for admin metrics — accessed from the WhatsApp admin frontend (different origin).
+// Auth is enforced by the admin password middleware on each route; CORS is just permission
+// for the browser to read the response.
+app.use("/api/admin/metrics", (req, res, next) => {
+  res.set({
+    "Access-Control-Allow-Origin": req.headers.origin || "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type,X-Admin-Password",
+    "Vary": "Origin",
   });
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -64,6 +79,7 @@ const globalLimiter = rateLimit({
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/public/")) return next();
   if (req.path.startsWith("/api/printer/mqtt-state")) return next();
+  if (req.path.startsWith("/api/admin/metrics/")) return next();
   globalLimiter(req, res, next);
 });
 
@@ -81,6 +97,7 @@ app.use("/api", printerControlRoutes);
 app.use("/api", publicCameraRoutes);
 app.use("/api", printVisionRoutes);
 app.use("/api", adminRoutes);
+app.use("/api", adminMetricsRoutes);
 
 // Global error handler
 app.use((err, _req, res, _next) => {
