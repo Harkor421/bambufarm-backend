@@ -380,6 +380,106 @@ router.get("/admin/metrics/bridges", requireAdmin, async (_req, res) => {
 });
 
 /* ─────────────────────────────────────────────────────────────────────────
+ * GET /api/admin/metrics/cameras
+ *
+ * Lists every camera with a live frame in the in-memory cache (i.e. every
+ * printer of every user currently running BambuBridge with the camera streaming).
+ * Cross-references PrinterState for printer name + status.
+ * ───────────────────────────────────────────────────────────────────────── */
+router.get("/admin/metrics/cameras", requireAdmin, async (_req, res) => {
+  try {
+    const wsManager = require("../services/wsManager");
+    const items = [];
+
+    if (wsManager.latestFrames) {
+      // Collect all (bambuUid, printerId) pairs that have a cached frame
+      const allPrinterIds = new Set();
+      for (const [, userFrames] of wsManager.latestFrames) {
+        for (const printerId of userFrames.keys()) allPrinterIds.add(printerId);
+      }
+
+      // Look up printer names + status in one query
+      const states = await PrinterState.find({ printer_dev_id: { $in: [...allPrinterIds] } })
+        .select("printer_dev_id printer_name notif_status notif_job_title")
+        .lean();
+      const stateMap = {};
+      for (const s of states) {
+        if (!stateMap[s.printer_dev_id]) stateMap[s.printer_dev_id] = s;
+      }
+
+      // Map bambu_uid → user record (to anonymize/identify owner)
+      const bambuUids = [...wsManager.latestFrames.keys()];
+      const users = await User.find({ bambu_uid: { $in: bambuUids } })
+        .select("bambu_uid expo_push_token")
+        .lean();
+      const userMap = {};
+      for (const u of users) {
+        if (!userMap[u.bambu_uid]) userMap[u.bambu_uid] = u;
+      }
+
+      for (const [bambuUid, userFrames] of wsManager.latestFrames) {
+        for (const [printerId, frame] of userFrames) {
+          const s = stateMap[printerId];
+          const u = userMap[bambuUid];
+          items.push({
+            bambuUid,
+            printerId,
+            printerName: s?.printer_name || printerId,
+            status: s?.notif_status || "unknown",
+            jobTitle: s?.notif_job_title || null,
+            frameSize: frame?.length || 0,
+            ownerPushTokenTail: u?.expo_push_token ? u.expo_push_token.slice(-12) : null,
+          });
+        }
+      }
+    }
+
+    // Sort: printing first, then by printer name
+    items.sort((a, b) => {
+      const order = { printing: 0, paused: 1, idle: 2, unknown: 3 };
+      const cmp = (order[a.status] ?? 99) - (order[b.status] ?? 99);
+      if (cmp !== 0) return cmp;
+      return a.printerName.localeCompare(b.printerName);
+    });
+
+    res.json({ ok: true, total: items.length, items });
+  } catch (err) {
+    log.error(`[ADMIN] Cameras list error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * GET /api/admin/metrics/cameras/:bambuUid/:printerId/frame
+ *
+ * Returns the latest JPEG frame as image/jpeg bytes. Designed to be used
+ * directly as <img src=...> with cache-busting query params.
+ *
+ * Password may be provided via either:
+ *   - X-Admin-Password header (preferred)
+ *   - ?password=... query param (necessary for <img> tags which can't set headers)
+ * ───────────────────────────────────────────────────────────────────────── */
+router.get("/admin/metrics/cameras/:bambuUid/:printerId/frame", requireAdmin, (req, res) => {
+  try {
+    const { bambuUid, printerId } = req.params;
+    const wsManager = require("../services/wsManager");
+    const frame = wsManager.getLatestFrame(bambuUid, printerId);
+    if (!frame) return res.status(404).end();
+
+    res.set({
+      "Content-Type": "image/jpeg",
+      "Content-Length": frame.length,
+      // Don't cache — the next request should get a fresh frame
+      "Cache-Control": "no-store, max-age=0",
+    });
+    res.end(frame);
+  } catch (err) {
+    log.error(`[ADMIN] Camera frame error: ${err.message}`);
+    res.status(500).end();
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
  * GET /api/admin/metrics/activity?limit=100
  *
  * Recent state transitions (live feed). In-memory ring buffer, last 200.
