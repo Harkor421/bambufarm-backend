@@ -64,21 +64,24 @@ function cacheUid(token, uid) {
   }
 }
 
-const { extractUidFromJwt, decodeJwtPayload } = require("../utils/bambuJwt");
-
 /**
  * Resolve the Bambu uid for a given access token.
  *
- * Lookup order (fastest → slowest):
- *   1. In-memory token cache (10 min TTL)
- *   2. JWT payload — trust it if it decodes cleanly and isn't expired
- *   3. Our own User collection in MongoDB — we stored the uid at register time
- *   4. Last resort: call Bambu API (should essentially never happen)
+ * SECURITY: We do NOT trust the JWT payload locally. Bambu's JWTs carry a uid
+ * claim, but we don't have Bambu's signing key, so we can't verify the signature.
+ * Trusting the unsigned payload would let anyone forge a token with a victim's
+ * publicly-discoverable uid and:
+ *   - On /ws/app: receive the victim's camera frames
+ *   - On /ws/bridge: inject arbitrary JPEGs into the victim's frame relay
+ *     (fanned out to their app clients, cached for the public/admin camera
+ *     feeds, and uploaded to R2 as mislabeled training data)
  *
- * The WS auth layer doesn't need to "verify" that Bambu still accepts the token —
- * the actual MQTT/camera authentication happens separately against Bambu's own
- * brokers with that same token, so a stale token gets caught there. This layer
- * just needs to answer "which user is this?" so we can route frames correctly.
+ * Lookup order:
+ *   1. In-memory token cache (10 min TTL — only populated by successful DB or
+ *      API lookups, never by JWT decode, so forged tokens can't poison it)
+ *   2. DB lookup by bambu_access_token (indexed). Every registered user has
+ *      bambu_uid stored; a forged token won't match any stored token.
+ *   3. Last resort: call Bambu API for tokens we've never seen.
  *
  * Returns a uid string on success, or null on failure.
  */
@@ -87,15 +90,7 @@ async function verifyBambuToken(accessToken) {
   const cached = getCachedUid(accessToken);
   if (cached) return cached;
 
-  // Fast path 2: trust the JWT if it decodes cleanly and isn't expired.
-  const uidFromJwt = extractUidFromJwt(accessToken);
-  if (uidFromJwt) {
-    cacheUid(accessToken, uidFromJwt);
-    return uidFromJwt;
-  }
-
-  // Fast path 3: look up the user in our own database.
-  // Every registered user has bambu_uid stored; we just need to find them by token.
+  // Fast path 2: DB lookup. Every registered user has bambu_uid stored.
   try {
     const User = require("../db/models/User");
     const user = await User.findOne({ bambu_access_token: accessToken })
@@ -109,16 +104,7 @@ async function verifyBambuToken(accessToken) {
     log.warn(`[WS] DB lookup failed for token verify: ${err.message}`);
   }
 
-  // Diagnostic: log what we know about this token so we can figure out why
-  // it didn't resolve. Don't log the token itself.
-  try {
-    const payload = decodeJwtPayload(accessToken);
-    if (payload) {
-      log.debug(`[WS] Token didn't resolve via JWT or DB. Payload keys: ${Object.keys(payload).join(",")}, exp=${payload.exp}`);
-    } else {
-      log.debug(`[WS] Token didn't resolve — not a JWT (length=${accessToken.length})`);
-    }
-  } catch {}
+  log.debug(`[WS] Token not in DB, falling back to Bambu API (length=${accessToken.length})`);
 
   // Last resort: call Bambu API. This path is expensive and rate-limited,
   // so it's wrapped in the same HTTPS keep-alive agent + cache.

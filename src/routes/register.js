@@ -1,7 +1,6 @@
 const { Router } = require("express");
 const User = require("../db/models/User");
 const log = require("../utils/logger");
-const { extractUidFromJwt } = require("../utils/bambuJwt");
 
 const router = Router();
 
@@ -40,18 +39,26 @@ router.post("/register", async (req, res) => {
     // Accept expired tokens — server will refresh them via tokenRefresh service
 
     // Resolve Bambu UID for cross-device notification routing.
-    // 1. Try to decode the JWT locally
-    // 2. If that fails, see if we already have this token stored from a previous register
-    // 3. Last resort: ask Bambu API
-    let bambuUid = extractUidFromJwt(accessToken);
-    if (!bambuUid) {
-      try {
-        const existing = await User.findOne({ bambu_access_token: accessToken })
-          .select("bambu_uid")
-          .lean();
-        if (existing?.bambu_uid) bambuUid = String(existing.bambu_uid);
-      } catch {}
-    }
+    //
+    // SECURITY: We do NOT trust JWT claims. Bambu JWTs aren't signature-verified
+    // here, so a forged token claiming a victim's uid would let the attacker
+    // register their own expo_push_token under the victim's account and receive
+    // the victim's push notifications. Always verify against an authoritative
+    // source.
+    //
+    // 1. If we have an existing User with this expo_push_token AND access_token,
+    //    reuse their stored bambu_uid (we verified it on first register).
+    // 2. If we have an existing User by expo_push_token only, reuse their uid
+    //    (token rotated, but the device hasn't changed).
+    // 3. Otherwise, call Bambu's profile API — a forged token will fail this.
+    let bambuUid = null;
+    try {
+      const existing = await User.findOne({ expo_push_token: expoPushToken })
+        .select("bambu_uid")
+        .lean();
+      if (existing?.bambu_uid) bambuUid = String(existing.bambu_uid);
+    } catch {}
+
     if (!bambuUid) {
       try {
         const axios = require("axios");
@@ -60,7 +67,12 @@ router.post("/register", async (req, res) => {
           timeout: 5000,
         });
         bambuUid = String(profile.data.uid);
-      } catch {}
+      } catch (err) {
+        // Bambu rejected the token — could be expired, malformed, or forged.
+        // Don't store an unverified bambu_uid; the user's record will be created
+        // without it, and notifications for that account won't be routed to them.
+        log.warn(`[REGISTER] Bambu profile lookup failed: ${err?.response?.status || err.message}`);
+      }
     }
 
     const update = {

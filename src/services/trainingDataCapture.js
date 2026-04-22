@@ -25,9 +25,19 @@ let s3Client = null;
 // build plate lowers, not the one from FINISH time (which shows an empty plate).
 // We stash the last frame seen while progress was 95-99% for each active print,
 // keyed by `${bambuUid}:${printerId}`.
+//
+// Lifecycle: entries are written by maybeStashPreEndFrame and read by both
+// captureTransition (R2 upload) and the Tecnoprints WhatsApp broadcast. We do
+// NOT clear entries after read — the previous code did, which raced with the
+// 2-second Tecnoprints sleep and caused the broadcast to fall back to the
+// post-plate-lower frame. Entries naturally get overwritten when the next
+// print on the same printer reaches the 95-99% window. A periodic sweep below
+// caps total entries and drops anything older than ~6 hours.
 const preEndFrames = new Map();
 const PRE_END_PROGRESS_MIN = 95;
 const PRE_END_PROGRESS_MAX = 99;
+const PRE_END_MAX_ENTRIES = 500;
+const PRE_END_TTL_MS = 6 * 60 * 60 * 1000;
 
 function getClient() {
   if (s3Client) return s3Client;
@@ -101,11 +111,27 @@ function maybeStashPreEndFrame(bambuUid, printerId, state) {
     const frame = wsManager.getLatestFrame(bambuUid, printerId);
     if (!frame) return;
 
-    preEndFrames.set(`${bambuUid}:${printerId}`, {
+    const key = `${bambuUid}:${printerId}`;
+    // Delete-then-set refreshes LRU position (Map preserves insertion order)
+    preEndFrames.delete(key);
+    preEndFrames.set(key, {
       frame,
       capturedAt: Date.now(),
       progressAtCapture: pct,
     });
+
+    // Bound size: evict oldest entries first, then anything past TTL
+    while (preEndFrames.size > PRE_END_MAX_ENTRIES) {
+      const oldest = preEndFrames.keys().next().value;
+      preEndFrames.delete(oldest);
+    }
+    if (preEndFrames.size > 50) {
+      const cutoff = Date.now() - PRE_END_TTL_MS;
+      for (const [k, v] of preEndFrames) {
+        if (v.capturedAt >= cutoff) break; // entries are insertion-ordered ≈ time-ordered
+        preEndFrames.delete(k);
+      }
+    }
   } catch {}
 }
 
@@ -127,14 +153,11 @@ async function captureTransition({ bambuUid, printerId, printerName, gcodeState,
     if (!config.trainingCapture.enabled) return;
 
     const event = classifyEvent(gcodeState, effectivePrev, state);
-    if (!event) {
-      // Not an interesting transition — still clean up any buffered frame if we
-      // end up in an idle-ish state so the buffer doesn't leak.
-      if (gcodeState === "IDLE" || gcodeState === "FAILED" || gcodeState === "FINISH") {
-        clearPreEndFrame(bambuUid, printerId);
-      }
-      return;
-    }
+    if (!event) return;
+    // NOTE: don't clear the pre-end buffer here — the Tecnoprints WhatsApp
+    // broadcast reads it ~2s later. The buffer naturally gets overwritten when
+    // the next print on this printer reaches 95-99% progress, and is bounded
+    // by the LRU cap in maybeStashPreEndFrame.
 
     const client = getClient();
     if (!client) return;
@@ -162,7 +185,6 @@ async function captureTransition({ bambuUid, printerId, printerName, gcodeState,
     }
 
     if (!frame) {
-      clearPreEndFrame(bambuUid, printerId);
       // User isn't running BambuBridge or camera isn't streaming — nothing to capture
       return;
     }
@@ -217,8 +239,9 @@ async function captureTransition({ bambuUid, printerId, printerName, gcodeState,
       })),
     ]);
 
-    // Clean up the pre-end buffer so the next print on this printer starts fresh
-    clearPreEndFrame(bambuUid, printerId);
+    // NOTE: don't clear the pre-end buffer here — Tecnoprints reads it after a
+    // 2s sleep. Natural overwrite by the next print's 95-99% window handles
+    // staleness, and the LRU cap in maybeStashPreEndFrame bounds memory.
 
     log.info(`[TRAINING] Captured ${event.folder}/${event.event} for ${printerName || printerId} (${state?.mc_percent || 0}%, frame=${frameSource})`);
   } catch (err) {
