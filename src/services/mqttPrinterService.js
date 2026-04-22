@@ -457,15 +457,32 @@ class MqttPrinterService {
                 fail_count: { $lt: 5 },
               }).lean();
               log.debug(`[MQTT] Notifying ${allSameAccount.length} user(s) for uid ${bambuUid}`);
-              // Deduplicate by expo_push_token AND push-to-start token
+
+              // Dispatch the Live Activity ONCE for the whole bambu_uid group.
+              // Previously this ran per-user-record, causing N "no activity token"
+              // warnings when a Bambu account had multiple user records (e.g., 7
+              // for Tecnoprints) but only 1 device actually had the LA.
+              // The dispatcher now iterates all user records to find any valid
+              // tokens, dedupes by token, and falls back to push-to-start if
+              // an in-progress LA was lost (12h iOS expiry, app reinstall, etc.)
+              try {
+                const { dispatchLiveActivity } = require("./liveActivityDispatcher");
+                const { buildNotification } = require("./notificationBuilder");
+                const notif = buildNotification(state.gcode_state, prevGcodeState, state, devId, printerNames[devId] || devId);
+                if (notif) {
+                  await dispatchLiveActivity(allSameAccount, devId, notif, state, state.gcode_state, prevGcodeState, printerNames[devId] || devId);
+                }
+              } catch (e) {
+                log.warn(`[LA] dispatch error: ${e.message}`);
+              }
+
+              // Per-user side effects: push notifications + DB persistence.
+              // LA is already handled above; _handleStateChange skips its own LA dispatch.
               const sentPushTokens = new Set();
-              const sentPushToStartTokens = new Set();
               for (const u of allSameAccount) {
                 if (sentPushTokens.has(u.expo_push_token)) continue;
                 sentPushTokens.add(u.expo_push_token);
-                const skipPushToStart = u.la_push_to_start_token && sentPushToStartTokens.has(u.la_push_to_start_token);
-                if (u.la_push_to_start_token) sentPushToStartTokens.add(u.la_push_to_start_token);
-                await this._handleStateChange(u, devId, state, prevGcodeState, skipPushToStart, printerNames);
+                await this._handleStateChange(u, devId, state, prevGcodeState, true, printerNames);
               }
 
               // Send camera frame + status to Tecnoprints WhatsApp on ALL state changes
@@ -666,7 +683,6 @@ class MqttPrinterService {
 
     if (effectivePrev && gcodeState !== effectivePrev) {
       const { buildNotification } = require("./notificationBuilder");
-      const { dispatchLiveActivity } = require("./liveActivityDispatcher");
 
       // Fire-and-forget: capture a training sample if the transition is interesting
       // and the user has BambuBridge streaming (cached frame available).
@@ -703,16 +719,12 @@ class MqttPrinterService {
         if (notification.data) notification.data.bambuUid = user.bambu_uid || "";
         await sendPush(user.expo_push_token, notification);
 
-        const apnsSuccess = await dispatchLiveActivity(
-          user, devId, notification, state, gcodeState, effectivePrev, printerName, skipPushToStart
+        // LA dispatch is handled once per bambu_uid in onStateChange (caller).
+        // Persist mqtt_last_notif_at unconditionally — push delivery is enough.
+        await PrinterState.findOneAndUpdate(
+          { user_id: userId, printer_dev_id: devId },
+          { mqtt_last_notif_at: new Date() },
         );
-
-        if (apnsSuccess || !apns.isConfigured()) {
-          await PrinterState.findOneAndUpdate(
-            { user_id: userId, printer_dev_id: devId },
-            { mqtt_last_notif_at: new Date() },
-          );
-        }
       }
     }
   }
