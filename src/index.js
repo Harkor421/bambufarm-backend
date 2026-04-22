@@ -1,5 +1,9 @@
 require("dotenv").config();
 
+// Sentry must initialize BEFORE any other imports that might throw, so it can
+// instrument them. No-op if SENTRY_DSN isn't set, so local dev is unaffected.
+require("./services/sentry").init();
+
 const http = require("http");
 const app = require("./app");
 const { connectDB, mongoose } = require("./db/database");

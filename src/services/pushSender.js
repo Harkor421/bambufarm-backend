@@ -32,7 +32,13 @@ async function sendPush(expoPushToken, { title, body, data }) {
 
     const ticket = r.data?.data;
     if (ticket?.status === "error" && ticket?.details?.error === "DeviceNotRegistered") {
-      log.warn(`[PUSH] DeviceNotRegistered: ${expoPushToken.slice(0, 30)}...`);
+      log.warn(`[PUSH] DeviceNotRegistered: ${expoPushToken.slice(0, 30)}... — purging user`);
+      // User uninstalled the app — clean up their record so we stop trying to
+      // notify them (and stop wasting Bambu API calls polling their account).
+      try {
+        const { deleteUserAndRelated } = require("./userGc");
+        deleteUserAndRelated({ expo_push_token: expoPushToken }, "expo:DeviceNotRegistered").catch(() => {});
+      } catch {}
       return { deviceNotRegistered: true };
     }
 

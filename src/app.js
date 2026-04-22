@@ -106,9 +106,22 @@ app.use("/api", adminRoutes);
 app.use("/api", adminMetricsRoutes);
 
 // Global error handler
-app.use((err, _req, res, _next) => {
+const { captureException } = require("./services/sentry");
+app.use((err, req, res, _next) => {
   log.error("[EXPRESS]", err.stack || err.message);
+  captureException(err, { path: req.path, method: req.method });
   res.status(500).json({ ok: false, error: "Internal server error" });
+});
+
+// Catch unhandled promise rejections + uncaught exceptions globally so they
+// hit Sentry instead of disappearing into the void.
+process.on("unhandledRejection", (reason) => {
+  log.error("[UNHANDLED]", reason?.stack || reason);
+  captureException(reason instanceof Error ? reason : new Error(String(reason)));
+});
+process.on("uncaughtException", (err) => {
+  log.error("[UNCAUGHT]", err?.stack || err);
+  captureException(err);
 });
 
 module.exports = app;
