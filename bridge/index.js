@@ -113,8 +113,50 @@ async function discoverPrinters() {
 
 // ─── Camera management ───────────────────────────────────
 
+// Per-printer reconnect tracking. Prevents tight retry loops when a printer is
+// unreachable (LAN-only mode off, wrong access code, IP changed, etc.) — without
+// this, the bridge tried to reconnect every 5 seconds forever, spamming the
+// printer and the user's log file. We also stop retrying entirely after too
+// many consecutive failures; the user has to manually re-scan to recover.
+const cameraFailures = new Map(); // devId → { count, lastFailAt, suspended }
+const RETRY_BASE_MS = 5000;
+const RETRY_MAX_MS = 5 * 60 * 1000; // cap reconnect delay at 5 min
+const RETRY_CIRCUIT_BREAK = 12;     // stop retrying after this many failures
+
+function getRetryDelay(devId) {
+  const fail = cameraFailures.get(devId);
+  if (!fail) return RETRY_BASE_MS;
+  // Exponential: 5s, 10s, 20s, 40s, 80s, 160s, 300s (capped)
+  return Math.min(RETRY_BASE_MS * Math.pow(2, fail.count - 1), RETRY_MAX_MS);
+}
+
+function recordFailure(devId, kind) {
+  const fail = cameraFailures.get(devId) || { count: 0, lastFailAt: 0, suspended: false };
+  // Auth failures are permanent until config is re-scanned — don't retry at all.
+  if (kind === "authFailed") {
+    fail.suspended = true;
+    fail.suspendedReason = "auth";
+  }
+  fail.count += 1;
+  fail.lastFailAt = Date.now();
+  if (fail.count >= RETRY_CIRCUIT_BREAK) {
+    fail.suspended = true;
+    fail.suspendedReason = fail.suspendedReason || "too-many-failures";
+  }
+  cameraFailures.set(devId, fail);
+  return fail;
+}
+
+function clearFailures(devId) {
+  cameraFailures.delete(devId);
+}
+
 function startCamera(printer) {
   if (activeStreams.has(printer.devId)) return;
+
+  // Skip if circuit breaker tripped — user must re-scan to clear it.
+  const fail = cameraFailures.get(printer.devId);
+  if (fail?.suspended) return;
 
   console.log(`[Camera] Starting ${printer.name} (${printer.ip})`);
   streamStates.set(printer.devId, "connecting");
@@ -123,21 +165,44 @@ function startCamera(printer) {
     ip: printer.ip,
     accessCode: printer.accessCode,
     onFrame: (jpeg) => {
+      // First successful frame after failures — reset the failure counter
+      if (cameraFailures.has(printer.devId)) clearFailures(printer.devId);
       if (wsClient) wsClient.sendFrame(printer.devId, jpeg);
     },
     onStateChange: (state, msg) => {
-      console.log(`[Camera] ${printer.name}: ${state}${msg ? ` — ${msg}` : ""}`);
+      // Suppress repeat error logs after the first few — they're identical
+      const f = cameraFailures.get(printer.devId);
+      const isRepeatError = (state === "error" || state === "disconnected") && (f?.count || 0) > 2;
+      if (!isRepeatError) {
+        console.log(`[Camera] ${printer.name}: ${state}${msg ? ` — ${msg}` : ""}`);
+      }
       streamStates.set(printer.devId, state);
 
       if (state === "error" || state === "authFailed" || state === "disconnected") {
         activeStreams.delete(printer.devId);
-        // Auto-reconnect if still demanded
+        const failInfo = recordFailure(printer.devId, state);
+
+        if (failInfo.suspended) {
+          if (failInfo.suspendedReason === "auth") {
+            console.log(`[Camera] ${printer.name}: AUTH FAILED — won't retry. Re-scan to update access code.`);
+          } else {
+            console.log(`[Camera] ${printer.name}: stopped retrying after ${failInfo.count} failures. Re-scan to retry.`);
+          }
+          streamStates.set(printer.devId, "suspended");
+          return;
+        }
+
+        // Auto-reconnect with exponential backoff
         if (demandedPrinters.has(printer.devId)) {
+          const delay = getRetryDelay(printer.devId);
+          if (failInfo.count <= 3) {
+            console.log(`[Camera] ${printer.name}: retry in ${Math.round(delay / 1000)}s (attempt ${failInfo.count})`);
+          }
           setTimeout(() => {
             if (demandedPrinters.has(printer.devId) && !activeStreams.has(printer.devId)) {
               startCamera(printer);
             }
-          }, 5000);
+          }, delay);
         }
       }
     },
@@ -680,6 +745,9 @@ function startWebUI() {
       }
 
       if (req.method === "POST" && req.url === "/api/scan") {
+        // Re-scanning means the user is trying to fix something — clear suspended
+        // cameras so they get a fresh chance after the new config is saved.
+        cameraFailures.clear();
         // Run scan in background
         discoverPrinters().catch((err) => {
           console.error("[Scan] Error:", err.message || err);
