@@ -127,6 +127,53 @@ router.get("/printer/mqtt-state", async (req, res) => {
       }
     }
 
+    // Extract AMS slot data into a normalized shape so the app doesn't have to
+    // know the raw Bambu MQTT structure. One entry per AMS unit plus the
+    // virtual tray (vt_tray) for external spool holders.
+    function extractAms(state) {
+      try {
+        const units = [];
+        const rawAms = state?.ams?.ams;
+        if (Array.isArray(rawAms)) {
+          for (const unit of rawAms) {
+            units.push({
+              id: unit.id ?? null,
+              humidity: unit.humidity != null ? Number(unit.humidity) : null,
+              temp: unit.temp != null ? Number(unit.temp) : null,
+              trays: Array.isArray(unit.tray) ? unit.tray.map((t) => ({
+                id: t.id ?? null,
+                type: t.tray_type || null,        // "PLA", "PETG", "ABS", etc.
+                color: t.tray_color || null,      // hex string "RRGGBBAA"
+                subBrand: t.tray_sub_brands || null,
+                weight: t.tray_weight != null ? Number(t.tray_weight) : null,
+                diameter: t.tray_diameter != null ? Number(t.tray_diameter) : null,
+                remain: t.remain != null ? Number(t.remain) : null, // % remaining (some printers report this)
+                nozzleMin: t.nozzle_temp_min != null ? Number(t.nozzle_temp_min) : null,
+                nozzleMax: t.nozzle_temp_max != null ? Number(t.nozzle_temp_max) : null,
+              })) : [],
+            });
+          }
+        }
+        const vt = state?.vt_tray;
+        const virtualTray = vt && (vt.tray_type || vt.tray_color) ? {
+          type: vt.tray_type || null,
+          color: vt.tray_color || null,
+          subBrand: vt.tray_sub_brands || null,
+          weight: vt.tray_weight != null ? Number(vt.tray_weight) : null,
+        } : null;
+        if (units.length === 0 && !virtualTray) return null;
+        return {
+          units,
+          virtualTray,
+          trayNow: state?.ams?.tray_now ?? null,    // currently loaded tray
+          trayPre: state?.ams?.tray_pre ?? null,    // previously loaded
+          trayTar: state?.ams?.tray_tar ?? null,    // target
+        };
+      } catch {
+        return null;
+      }
+    }
+
     const result = {};
     for (const [devId, state] of Object.entries(states)) {
       result[devId] = {
@@ -151,6 +198,7 @@ router.get("/printer/mqtt-state", async (req, res) => {
         hms: Array.isArray(state.hms) && state.hms.length > 0 ? state.hms : null,
         preparePercent: state.gcode_file_prepare_percent != null ? Number(state.gcode_file_prepare_percent) : null,
         stage: state.stg_cur ?? null,
+        ams: extractAms(state),
       };
     }
     res.json({ ok: true, printers: result });
