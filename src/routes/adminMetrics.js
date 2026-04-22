@@ -394,65 +394,125 @@ router.get("/admin/metrics/cameras", requireAdmin, async (_req, res) => {
     // The frontend polls every ~8s; this re-arms a 30s window so as long as
     // the admin keeps viewing, bridges keep streaming. Naturally lapses ~30s
     // after they navigate away.
-    // Fire-and-forget — DB lookup happens in background; we don't block the
-    // response on it. First poll may not show frames from newly-demanded bridges
-    // (no time for them to start streaming), but subsequent polls will.
     wsManager.markAdminCameraDemand().catch(() => {});
 
+    // Build the cameras list in two passes:
+    // (1) every printer of every CONNECTED bridge, regardless of frame availability —
+    //     this lets the admin see "bridge online but camera not streaming" cases
+    //     (LAN-only mode off, wrong access code, printer unreachable, etc.) instead
+    //     of silently omitting those users.
+    // (2) any cached frames also surface (bridges may have streamed without us
+    //     having a current bridges entry, edge case during reconnect).
+
     const items = [];
+    const seen = new Set(); // `${uid}:${printerId}`
 
-    if (wsManager.latestFrames) {
-      // Collect all (bambuUid, printerId) pairs that have a cached frame
-      const allPrinterIds = new Set();
-      for (const [, userFrames] of wsManager.latestFrames) {
-        for (const printerId of userFrames.keys()) allPrinterIds.add(printerId);
+    // Step 1: gather (uid, printerId) pairs from every connected bridge's known printers.
+    const bridgeUids = wsManager.bridges ? [...wsManager.bridges.keys()] : [];
+    let bridgePrinters = []; // [{ bambuUid, printerId, printerName, status, jobTitle, hasFrame }]
+
+    if (bridgeUids.length > 0) {
+      const bridgeUsers = await User.find({ bambu_uid: { $in: bridgeUids } })
+        .select("_id bambu_uid expo_push_token")
+        .lean();
+      const userIdsByUid = {};
+      const allUserIds = [];
+      const userByUid = {};
+      for (const u of bridgeUsers) {
+        if (!userIdsByUid[u.bambu_uid]) userIdsByUid[u.bambu_uid] = [];
+        userIdsByUid[u.bambu_uid].push(u._id);
+        if (!userByUid[u.bambu_uid]) userByUid[u.bambu_uid] = u;
+        allUserIds.push(u._id);
       }
 
-      // Look up printer names + status in one query
-      const states = await PrinterState.find({ printer_dev_id: { $in: [...allPrinterIds] } })
-        .select("printer_dev_id printer_name notif_status notif_job_title")
+      const states = await PrinterState.find({ user_id: { $in: allUserIds } })
+        .select("user_id printer_dev_id printer_name notif_status notif_job_title")
         .lean();
-      const stateMap = {};
+
       for (const s of states) {
-        if (!stateMap[s.printer_dev_id]) stateMap[s.printer_dev_id] = s;
-      }
+        // Map user_id back to bambu_uid
+        let foundUid = null;
+        for (const [uid, ids] of Object.entries(userIdsByUid)) {
+          if (ids.some((id) => String(id) === String(s.user_id))) { foundUid = uid; break; }
+        }
+        if (!foundUid) continue;
+        const key = `${foundUid}:${s.printer_dev_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
 
-      // Map bambu_uid → user record (to anonymize/identify owner)
-      const bambuUids = [...wsManager.latestFrames.keys()];
-      const users = await User.find({ bambu_uid: { $in: bambuUids } })
-        .select("bambu_uid expo_push_token")
-        .lean();
-      const userMap = {};
-      for (const u of users) {
-        if (!userMap[u.bambu_uid]) userMap[u.bambu_uid] = u;
+        const hasFrame = !!wsManager.getLatestFrame(foundUid, s.printer_dev_id);
+        const u = userByUid[foundUid];
+        bridgePrinters.push({
+          bambuUid: foundUid,
+          printerId: s.printer_dev_id,
+          printerName: s.printer_name || s.printer_dev_id,
+          status: s.notif_status || "unknown",
+          jobTitle: s.notif_job_title || null,
+          hasFrame,
+          ownerPushTokenTail: u?.expo_push_token ? u.expo_push_token.slice(-12) : null,
+        });
       }
+    }
+    items.push(...bridgePrinters);
 
+    // Step 2: any cached frames not already covered above (e.g. user disconnected
+    // bridge mid-poll but we still have a recent frame in memory).
+    if (wsManager.latestFrames) {
+      const orphanIds = new Set();
       for (const [bambuUid, userFrames] of wsManager.latestFrames) {
-        for (const [printerId, frame] of userFrames) {
-          const s = stateMap[printerId];
-          const u = userMap[bambuUid];
-          items.push({
-            bambuUid,
-            printerId,
-            printerName: s?.printer_name || printerId,
-            status: s?.notif_status || "unknown",
-            jobTitle: s?.notif_job_title || null,
-            frameSize: frame?.length || 0,
-            ownerPushTokenTail: u?.expo_push_token ? u.expo_push_token.slice(-12) : null,
-          });
+        for (const printerId of userFrames.keys()) {
+          const key = `${bambuUid}:${printerId}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            orphanIds.add(printerId);
+            items.push({
+              bambuUid,
+              printerId,
+              printerName: printerId,
+              status: "unknown",
+              jobTitle: null,
+              hasFrame: true,
+              ownerPushTokenTail: null,
+            });
+          }
+        }
+      }
+      // Backfill names for orphan entries if we can find them
+      if (orphanIds.size > 0) {
+        const orphanStates = await PrinterState.find({ printer_dev_id: { $in: [...orphanIds] } })
+          .select("printer_dev_id printer_name notif_status notif_job_title")
+          .lean();
+        const orphanMap = {};
+        for (const s of orphanStates) if (!orphanMap[s.printer_dev_id]) orphanMap[s.printer_dev_id] = s;
+        for (const item of items) {
+          if (item.printerName === item.printerId && orphanMap[item.printerId]) {
+            const s = orphanMap[item.printerId];
+            item.printerName = s.printer_name || item.printerName;
+            item.status = s.notif_status || item.status;
+            item.jobTitle = s.notif_job_title || item.jobTitle;
+          }
         }
       }
     }
 
-    // Sort: printing first, then by printer name
+    // Sort: streaming first (by status: printing, paused, idle), then offline cameras
     items.sort((a, b) => {
+      // Frames-available cameras first
+      if (a.hasFrame !== b.hasFrame) return a.hasFrame ? -1 : 1;
       const order = { printing: 0, paused: 1, idle: 2, unknown: 3 };
       const cmp = (order[a.status] ?? 99) - (order[b.status] ?? 99);
       if (cmp !== 0) return cmp;
       return a.printerName.localeCompare(b.printerName);
     });
 
-    res.json({ ok: true, total: items.length, items });
+    const streamingCount = items.filter((i) => i.hasFrame).length;
+    res.json({
+      ok: true,
+      total: items.length,
+      streaming: streamingCount,
+      offline: items.length - streamingCount,
+      items,
+    });
   } catch (err) {
     log.error(`[ADMIN] Cameras list error: ${err.message}`);
     res.status(500).json({ ok: false, error: err.message });
