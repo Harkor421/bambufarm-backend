@@ -105,6 +105,7 @@ router.post("/printer/light", (req, res) => {
 
 // POST /api/printer/ams-filament — update an AMS slot's color/material/temp
 // Body: { expoPushToken, printerId, amsId, trayId, trayColor, trayType, trayInfoIdx?, nozzleTempMin?, nozzleTempMax? }
+// Always uses Bambu cloud MQTT directly — no bridge fallback.
 // Bambu only honors this when the printer is IDLE or PAUSE.
 router.post("/printer/ams-filament", async (req, res) => {
   try {
@@ -134,14 +135,8 @@ router.post("/printer/ams-filament", async (req, res) => {
 
     log.info(`[CTRL] ams-filament ${printerId}: uid=${user.bambu_uid} ams=${amsId} tray=${trayId} ${trayType} ${color}`);
 
-    // Try bridge first (works for everything), then direct cloud MQTT
-    if (user.bambu_uid && wsManager.isBridgeConnected(user.bambu_uid)) {
-      const result = await wsManager.sendPrinterCommand(user.bambu_uid, printerId, "ams_filament_setting", params);
-      return res.json({ ok: result.success, via: "bridge", error: result.error || null });
-    }
-
     const sent = mqttService.setAmsFilament(String(user._id), printerId, params);
-    res.json({ ok: sent, via: "mqtt", error: sent ? null : "MQTT not connected" });
+    res.json({ ok: sent, via: "mqtt", error: sent ? null : "MQTT not connected for this user" });
   } catch (err) {
     log.error(`[CTRL] ams-filament error: ${err.message}`);
     res.status(500).json({ ok: false, error: "Internal error" });
