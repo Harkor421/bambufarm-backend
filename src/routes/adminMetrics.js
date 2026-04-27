@@ -564,4 +564,47 @@ router.get("/admin/metrics/activity", requireAdmin, async (req, res) => {
   }
 });
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * POST /api/admin/metrics/printer/ams-filament
+ *
+ * Test/manual endpoint to update an AMS slot's color + material via MQTT.
+ * Body: { bambuUid, printerId, amsId, trayId, trayColor, trayType,
+ *         trayInfoIdx?, nozzleTempMin?, nozzleTempMax? }
+ *
+ * Bambu only honors this when the printer is IDLE or PAUSE — it's silently
+ * ignored during an active print. Use sparingly while testing.
+ * ───────────────────────────────────────────────────────────────────────── */
+router.post("/admin/metrics/printer/ams-filament", requireAdmin, async (req, res) => {
+  try {
+    const { bambuUid, printerId, amsId = 0, trayId, trayColor, trayType, trayInfoIdx, nozzleTempMin, nozzleTempMax } = req.body || {};
+    if (!bambuUid || !printerId || trayId == null || !trayColor || !trayType) {
+      return res.status(400).json({
+        ok: false,
+        error: "Required: bambuUid, printerId, trayId, trayColor (RRGGBBAA hex), trayType",
+      });
+    }
+    const mqttService = require("../services/mqttPrinterService");
+    const sent = mqttService.setAmsFilament(String(bambuUid), printerId, {
+      amsId: Number(amsId),
+      trayId: Number(trayId),
+      trayColor,
+      trayType,
+      trayInfoIdx,
+      nozzleTempMin: nozzleTempMin != null ? Number(nozzleTempMin) : undefined,
+      nozzleTempMax: nozzleTempMax != null ? Number(nozzleTempMax) : undefined,
+    });
+    if (!sent) {
+      return res.status(503).json({
+        ok: false,
+        error: "MQTT not connected for this user — printer may be offline or user not registered",
+      });
+    }
+    log.info(`[ADMIN] ams_filament_setting sent: uid=${bambuUid} printer=${printerId} ams=${amsId} tray=${trayId} color=${trayColor} type=${trayType}`);
+    res.json({ ok: true, message: "Command sent — check the printer in 1-2 seconds" });
+  } catch (err) {
+    log.error(`[ADMIN] ams-filament error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;

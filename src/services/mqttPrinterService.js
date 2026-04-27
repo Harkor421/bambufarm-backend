@@ -132,6 +132,37 @@ class PrinterMqttConnection {
     return this.sendCommand(devId, { print: { sequence_id: String(this.sequenceId), command: "stop" } });
   }
 
+  /**
+   * Update an AMS slot's filament metadata (color/material/temp).
+   * Only takes effect when the printer is IDLE or PAUSE — Bambu rejects this
+   * during an active print.
+   *
+   * @param {string} devId
+   * @param {object} params
+   * @param {number} params.amsId - AMS unit index (0 = first AMS)
+   * @param {number} params.trayId - Slot index within the AMS (0-3)
+   * @param {string} params.trayColor - "RRGGBBAA" hex (e.g. "26FF9AFF")
+   * @param {string} params.trayType - "PLA" | "PETG" | "ABS" | "TPU" | etc.
+   * @param {string} [params.trayInfoIdx] - Bambu filament profile id (e.g. "GFL00")
+   * @param {number} [params.nozzleTempMin]
+   * @param {number} [params.nozzleTempMax]
+   */
+  setAmsFilament(devId, params) {
+    return this.sendCommand(devId, {
+      print: {
+        sequence_id: String(this.sequenceId),
+        command: "ams_filament_setting",
+        ams_id: params.amsId ?? 0,
+        tray_id: params.trayId ?? 0,
+        tray_color: params.trayColor,
+        tray_type: params.trayType,
+        ...(params.trayInfoIdx ? { tray_info_idx: params.trayInfoIdx } : {}),
+        ...(params.nozzleTempMin != null ? { nozzle_temp_min: params.nozzleTempMin } : {}),
+        ...(params.nozzleTempMax != null ? { nozzle_temp_max: params.nozzleTempMax } : {}),
+      },
+    });
+  }
+
   /** Set print speed level (1=Silent, 2=Standard, 3=Sport, 4=Ludicrous) */
   setSpeed(devId, level) {
     return this.sendCommand(devId, { print: { sequence_id: String(this.sequenceId), command: "print_speed", param: String(level) } });
@@ -347,6 +378,11 @@ class MqttPrinterService {
   setLight(userId, devId, on) {
     const conn = this._findConnectionByUserId(userId);
     return conn ? conn.setLight(devId, on) : false;
+  }
+
+  setAmsFilament(userId, devId, params) {
+    const conn = this._findConnectionByUserId(userId);
+    return conn ? conn.setAmsFilament(devId, params) : false;
   }
 
   sendGcode(userId, devId, gcode) {
