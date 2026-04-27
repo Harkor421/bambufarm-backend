@@ -135,7 +135,16 @@ router.post("/printer/ams-filament", async (req, res) => {
 
     log.info(`[CTRL] ams-filament ${printerId}: uid=${user.bambu_uid} ams=${amsId} tray=${trayId} ${trayType} ${color}`);
 
-    const sent = mqttService.setAmsFilament(String(user._id), printerId, params);
+    // Look up MQTT connection by bambu_uid first (works across multi-record
+    // accounts like Tecnoprints where 7 user records share one MQTT connection),
+    // then fall back to user._id.
+    let sent = false;
+    if (user.bambu_uid) {
+      sent = mqttService.setAmsFilament(String(user.bambu_uid), printerId, params);
+    }
+    if (!sent) {
+      sent = mqttService.setAmsFilament(String(user._id), printerId, params);
+    }
     res.json({ ok: sent, via: "mqtt", error: sent ? null : "MQTT not connected for this user" });
   } catch (err) {
     log.error(`[CTRL] ams-filament error: ${err.message}`);
