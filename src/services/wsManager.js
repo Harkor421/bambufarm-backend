@@ -756,6 +756,33 @@ class WsManager {
   }
 
   /**
+   * Push a real-time MQTT state update to all app clients of a given uid.
+   *
+   * Called by mqttPrinterService when a printer's state changes. Replaces the
+   * 5-second polling loop on the app side — clients receive state changes
+   * within ~50ms instead of waiting for the next poll interval.
+   *
+   * @param {string} bambuUid
+   * @param {string} devId - Printer device ID
+   * @param {object} normalizedState - The same shape as `/api/printer/mqtt-state`
+   *   returns per-printer (gcodeState, percent, ams, etc.)
+   */
+  broadcastMqttState(bambuUid, devId, normalizedState) {
+    const clients = this.appClients.get(String(bambuUid));
+    if (!clients || clients.size === 0) return;
+    const msg = JSON.stringify({
+      type: "printer_state",
+      printerId: devId,
+      state: normalizedState,
+    });
+    for (const ws of clients) {
+      if (ws.readyState === 1) {
+        try { ws.send(msg); } catch {}
+      }
+    }
+  }
+
+  /**
    * Send a printer command via bridge relay.
    * @param {string} userId - Bambu UID
    * @param {string} devId - Printer device ID

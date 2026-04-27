@@ -199,6 +199,23 @@ class PrinterMqttConnection {
       maybeStashPreEndFrame(this.bambuUid, devId, merged);
     } catch {}
 
+    // Push real-time MQTT state to subscribed app clients via WebSocket.
+    // Throttled to 1 push per 2 seconds per printer to avoid flooding (Bambu
+    // sends multiple raw messages per second). State changes (gcode_state)
+    // always push immediately for instant UI feedback.
+    try {
+      if (!this._lastStatePush) this._lastStatePush = new Map();
+      const now = Date.now();
+      const lastPush = this._lastStatePush.get(devId) || 0;
+      const stateChanged = p.gcode_state && p.gcode_state !== prev.gcode_state;
+      if (stateChanged || now - lastPush >= 2000) {
+        this._lastStatePush.set(devId, now);
+        const wsManager = require("./wsManager");
+        const { normalizeMqttState } = require("../utils/normalizeMqttState");
+        wsManager.broadcastMqttState(this.bambuUid, devId, normalizeMqttState(merged));
+      }
+    } catch {}
+
     // Send LA progress update at 20% boundaries only (0%, 20%, 40%, 60%, 80%, 100%).
     // Apple's APNs budget for Live Activities is ~4-5 priority-10 updates/hour — a
     // 24h print on time-based polling would blow that budget 100x over and get the
