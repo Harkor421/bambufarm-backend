@@ -608,6 +608,26 @@ router.post("/admin/metrics/printer/ams-filament", requireAdmin, async (req, res
 });
 
 /* ─────────────────────────────────────────────────────────────────────────
+ * GET /api/admin/metrics/printer/:bambuUid/:printerId/state
+ *
+ * Returns the full in-memory MQTT state for a printer (including AMS), as
+ * received from Bambu's cloud broker. Used to confirm whether commands sent
+ * via the probe endpoint actually mutated state on the printer.
+ * ───────────────────────────────────────────────────────────────────────── */
+router.get("/admin/metrics/printer/:bambuUid/:printerId/state", requireAdmin, (req, res) => {
+  try {
+    const { bambuUid, printerId } = req.params;
+    const mqttService = require("../services/mqttPrinterService");
+    const state = mqttService.getPrinterState(String(bambuUid), printerId);
+    if (!state) return res.status(404).json({ ok: false, error: "No MQTT state for this printer (user not connected or printer not seen yet)" });
+    res.json({ ok: true, bambuUid, printerId, state });
+  } catch (err) {
+    log.error(`[ADMIN] state error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
  * POST /api/admin/metrics/printer/probe
  *
  * Probe which Bambu cloud MQTT commands work without bridge signing.
