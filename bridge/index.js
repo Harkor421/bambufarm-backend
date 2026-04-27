@@ -17,6 +17,9 @@ const { scanAndMatch, getLocalIp } = require("./networkScanner");
 const { createCameraStream } = require("./cameraStream");
 const { BridgeWsClient } = require("./wsClient");
 const { PrinterMqttControl } = require("./mqttControl");
+const onvif = require("./onvifDiscovery");
+const { createSnapshotPuller, fetchSnapshot } = require("./cameraSnapshotPuller");
+const crypto = require("crypto");
 
 const UI_PORT = 8095;
 
@@ -37,6 +40,7 @@ const DEFAULT_SERVER_URL = "wss://bambufarm-api-production.up.railway.app/ws/bri
 let config = {
   bambuTokens: null, // { accessToken, refreshToken, expiresAt }
   printers: [],      // [{ devId, name, ip, accessCode }]
+  cameras: [],       // [{ id, name, brand?, model?, ip?, snapshotUrl, username?, password?, boundPrinterId?, addedAt }]
 };
 
 let bridgeRunning = false;
@@ -48,6 +52,11 @@ let demandedPrinters = new Set();
 const mqttControl = new PrinterMqttControl();
 let scanProgress = null;           // { message, progress } or null
 let loginPending = null;           // { email } if waiting for 2FA code
+
+// IP camera scan + streaming state
+let cameraScanState = null;        // { running, progress, found } or null
+const cameraStreams = new Map();   // cameraId → { stop }
+const cameraStreamStates = new Map(); // cameraId → state string
 
 // ─── Config persistence ──────────────────────────────────
 
@@ -221,6 +230,54 @@ function stopAllCameras() {
   for (const [id] of activeStreams) stopCamera(id);
 }
 
+// ─── IP camera bindings (ONVIF / HTTP snapshot) ──────────
+
+function findCameraBoundTo(printerId) {
+  return config.cameras.find((c) => c.boundPrinterId === printerId) || null;
+}
+
+function startIpCamera(camera, printerId) {
+  if (cameraStreams.has(camera.id)) return;
+  console.log(`[IPCam] Starting ${camera.name} → ${printerId}`);
+  cameraStreamStates.set(camera.id, "connecting");
+
+  const puller = createSnapshotPuller({
+    snapshotUrl: camera.snapshotUrl,
+    username: camera.username,
+    password: camera.password,
+    intervalMs: camera.intervalMs || 1000,
+    onFrame: (jpeg) => {
+      // Reuse the existing frame pipeline — relay to the bound printer's devId
+      // so the app shows it in the existing camera viewer with no changes.
+      if (wsClient) wsClient.sendFrame(printerId, jpeg);
+    },
+    onStateChange: (state, msg) => {
+      cameraStreamStates.set(camera.id, state);
+      if (state === "connected") {
+        console.log(`[IPCam] ${camera.name}: connected`);
+      } else if (state === "authFailed") {
+        console.log(`[IPCam] ${camera.name}: AUTH FAILED — won't retry. Update credentials.`);
+        cameraStreams.delete(camera.id);
+      } else if (state === "error") {
+        // Single-line log; the puller does its own backoff
+        console.log(`[IPCam] ${camera.name}: ${msg || "error"}`);
+      }
+    },
+  });
+
+  cameraStreams.set(camera.id, puller);
+}
+
+function stopIpCamera(cameraId) {
+  const puller = cameraStreams.get(cameraId);
+  if (puller) { puller.stop(); cameraStreams.delete(cameraId); }
+  cameraStreamStates.set(cameraId, "idle");
+}
+
+function stopAllIpCameras() {
+  for (const [id] of cameraStreams) stopIpCamera(id);
+}
+
 function handleDemandUpdate(printerIds) {
   const newDemand = new Set(printerIds);
 
@@ -234,12 +291,24 @@ function handleDemandUpdate(printerIds) {
 
   for (const id of newDemand) {
     if (!demandedPrinters.has(id)) {
-      const printer = config.printers.find((p) => p.devId === id);
-      if (printer) startCamera(printer);
+      // If an IP camera is bound to this printer, prefer it over the Bambu cam.
+      // The bound camera relays frames using the printer's devId, so the app
+      // sees them through the existing pipeline with no protocol changes.
+      const ipCam = findCameraBoundTo(id);
+      if (ipCam) {
+        startIpCamera(ipCam, id);
+      } else {
+        const printer = config.printers.find((p) => p.devId === id);
+        if (printer) startCamera(printer);
+      }
     }
   }
   for (const id of demandedPrinters) {
-    if (!newDemand.has(id)) stopCamera(id);
+    if (!newDemand.has(id)) {
+      stopCamera(id);
+      const ipCam = findCameraBoundTo(id);
+      if (ipCam) stopIpCamera(ipCam.id);
+    }
   }
   demandedPrinters = newDemand;
 }
@@ -286,6 +355,7 @@ async function startBridge() {
 function stopBridge() {
   bridgeRunning = false;
   stopAllCameras();
+  stopAllIpCameras();
   mqttControl.disconnectAll();
   demandedPrinters = new Set();
   if (wsClient) { wsClient.stop(); wsClient = null; }
@@ -310,7 +380,20 @@ function getStatus() {
       ip: p.ip,
       streamState: streamStates.get(p.devId) || "idle",
       demanded: demandedPrinters.has(p.devId),
+      boundCameraId: (findCameraBoundTo(p.devId) || {}).id || null,
     })),
+    cameras: config.cameras.map((c) => ({
+      id: c.id,
+      name: c.name,
+      brand: c.brand || null,
+      model: c.model || null,
+      ip: c.ip || null,
+      snapshotUrl: c.snapshotUrl,
+      hasCredentials: !!(c.username || c.password),
+      boundPrinterId: c.boundPrinterId || null,
+      streamState: cameraStreamStates.get(c.id) || "idle",
+    })),
+    cameraScan: cameraScanState,
   };
 }
 
@@ -769,6 +852,119 @@ function startWebUI() {
       if (req.method === "POST" && req.url === "/api/bridge/stop") {
         stopBridge();
         return sendJson(res, { ok: true });
+      }
+
+      // ─── IP camera routes ────────────────────────────
+
+      // Run ONVIF discovery — returns immediately, results polled via /api/status
+      if (req.method === "POST" && req.url === "/api/cameras/scan") {
+        if (cameraScanState?.running) return sendJson(res, { ok: true });
+        cameraScanState = { running: true, progress: 0, found: [] };
+        onvif.discover((cam) => {
+          cameraScanState.found.push(cam);
+          console.log(`[ONVIF] Found ${cam.brand || "?"} ${cam.model || ""} at ${cam.ip}`);
+        }).then((all) => {
+          cameraScanState = { running: false, progress: 1, found: all };
+          console.log(`[ONVIF] Scan done — ${all.length} camera(s) found`);
+          // Auto-clear after 60s so a stale scan doesn't sit in the UI forever
+          setTimeout(() => { if (!cameraScanState?.running) cameraScanState = null; }, 60000);
+        }).catch((err) => {
+          console.error("[ONVIF] Scan error:", err.message);
+          cameraScanState = { running: false, progress: 1, found: [], error: err.message };
+        });
+        return sendJson(res, { ok: true });
+      }
+
+      // Add a camera (manual or from a discovery result)
+      if (req.method === "POST" && req.url === "/api/cameras") {
+        const body = await parseBody(req);
+        const { name, snapshotUrl, username, password, brand, model, ip, intervalMs } = body || {};
+        if (!name || !snapshotUrl) {
+          return sendJson(res, { ok: false, error: "name and snapshotUrl are required" }, 400);
+        }
+        const cam = {
+          id: crypto.randomUUID(),
+          name: String(name).slice(0, 80),
+          snapshotUrl: String(snapshotUrl),
+          username: username || undefined,
+          password: password || undefined,
+          brand: brand || undefined,
+          model: model || undefined,
+          ip: ip || undefined,
+          intervalMs: intervalMs ? Math.max(250, Number(intervalMs)) : undefined,
+          boundPrinterId: null,
+          addedAt: new Date().toISOString(),
+        };
+        config.cameras.push(cam);
+        saveConfig();
+        return sendJson(res, { ok: true, camera: { ...cam, password: cam.password ? "***" : undefined } });
+      }
+
+      // Test a snapshot URL without saving — useful for the UI before commit
+      if (req.method === "POST" && req.url === "/api/cameras/test") {
+        const { snapshotUrl, username, password } = await parseBody(req);
+        if (!snapshotUrl) return sendJson(res, { ok: false, error: "snapshotUrl required" }, 400);
+        try {
+          const t0 = Date.now();
+          const jpeg = await fetchSnapshot(snapshotUrl, username, password);
+          return sendJson(res, { ok: true, bytes: jpeg.length, took_ms: Date.now() - t0 });
+        } catch (err) {
+          return sendJson(res, { ok: false, error: err.message }, 400);
+        }
+      }
+
+      // Camera-specific routes: /api/cameras/:id/(bind|unbind|delete)
+      const camRoute = req.url.match(/^\/api\/cameras\/([^/]+)(?:\/(\w+))?$/);
+      if (camRoute) {
+        const cameraId = camRoute[1];
+        const action = camRoute[2] || null;
+        const cam = config.cameras.find((c) => c.id === cameraId);
+        if (!cam) return sendJson(res, { ok: false, error: "Camera not found" }, 404);
+
+        if (req.method === "POST" && action === "bind") {
+          const { printerId } = await parseBody(req);
+          if (!printerId) return sendJson(res, { ok: false, error: "printerId required" }, 400);
+          // Unbind any other camera from that printer first — one-cam-per-printer
+          for (const c of config.cameras) {
+            if (c.boundPrinterId === printerId && c.id !== cameraId) {
+              c.boundPrinterId = null;
+              stopIpCamera(c.id);
+            }
+          }
+          cam.boundPrinterId = printerId;
+          saveConfig();
+          // If that printer is currently being demanded, swap from Bambu cam to IP cam now
+          if (demandedPrinters.has(printerId)) {
+            stopCamera(printerId);
+            startIpCamera(cam, printerId);
+          }
+          return sendJson(res, { ok: true });
+        }
+
+        if (req.method === "POST" && action === "unbind") {
+          const printerId = cam.boundPrinterId;
+          cam.boundPrinterId = null;
+          saveConfig();
+          stopIpCamera(cam.id);
+          // If printer is still demanded, fall back to its Bambu camera (if any)
+          if (printerId && demandedPrinters.has(printerId)) {
+            const printer = config.printers.find((p) => p.devId === printerId);
+            if (printer) startCamera(printer);
+          }
+          return sendJson(res, { ok: true });
+        }
+
+        if (req.method === "DELETE" && !action) {
+          stopIpCamera(cam.id);
+          const printerId = cam.boundPrinterId;
+          config.cameras = config.cameras.filter((c) => c.id !== cameraId);
+          saveConfig();
+          if (printerId && demandedPrinters.has(printerId)) {
+            const printer = config.printers.find((p) => p.devId === printerId);
+            if (printer) startCamera(printer);
+          }
+          return sendJson(res, { ok: true });
+        }
       }
 
       res.writeHead(404);
