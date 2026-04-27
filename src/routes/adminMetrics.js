@@ -607,4 +607,170 @@ router.post("/admin/metrics/printer/ams-filament", requireAdmin, async (req, res
   }
 });
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * POST /api/admin/metrics/printer/probe
+ *
+ * Probe which Bambu cloud MQTT commands work without bridge signing.
+ * Sends each command in `commands` (or a default safe-ish suite) in series,
+ * waiting up to `timeoutMs` per command for a reply matched by sequence_id.
+ *
+ * A `response: null` after timeout = Bambu silently dropped the command,
+ * which usually means signing is required (only the bridge can do it).
+ * A `response.result === "success"` = command worked direct on cloud.
+ * A `response.reason` or `response.result === "fail"` = Bambu rejected it
+ * with a known error (signing/auth/state-machine etc.).
+ *
+ * Body:
+ *   bambuUid: string                       (required)
+ *   printerId: string                      (required)
+ *   commands?: string[]                    (optional, defaults to safe suite)
+ *   timeoutMs?: number                     (optional, default 4000)
+ *
+ * IMPORTANT: only run on an IDLE printer. Some commands in the suite
+ * (pause/resume/stop) would interrupt an active print if Bambu actually
+ * accepts them.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+// Probe suite. Each entry: { name, subKey, payload }
+// `payload[subKey].sequence_id` is filled in by probeCommand.
+const PROBE_SUITE = {
+  // Already known to work on cloud (used in production)
+  light_on: {
+    subKey: "system",
+    payload: { system: { command: "ledctrl", led_node: "chamber_light", led_mode: "on", led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } },
+  },
+  light_off: {
+    subKey: "system",
+    payload: { system: { command: "ledctrl", led_node: "chamber_light", led_mode: "off", led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } },
+  },
+  speed_standard: {
+    subKey: "print",
+    payload: { print: { command: "print_speed", param: "2" } },
+  },
+  // The one we just wired up
+  ams_filament: {
+    subKey: "print",
+    payload: {
+      print: {
+        command: "ams_filament_setting",
+        ams_id: 0, tray_id: 0,
+        tray_color: "26FF9AFF", tray_type: "PLA",
+        tray_info_idx: "GFL00", nozzle_temp_min: 190, nozzle_temp_max: 230,
+      },
+    },
+  },
+  // pushall is informational, not a control command — should always work
+  pushall: {
+    subKey: "pushing",
+    payload: { pushing: { command: "pushall", version: 1, push_target: 1 } },
+  },
+  // Suspected to require signing
+  pause: {
+    subKey: "print",
+    payload: { print: { command: "pause" } },
+  },
+  resume: {
+    subKey: "print",
+    payload: { print: { command: "resume" } },
+  },
+  stop: {
+    subKey: "print",
+    payload: { print: { command: "stop" } },
+  },
+  // Single g-code line — print_speed equivalent via raw gcode
+  gcode_M105: {
+    subKey: "print",
+    payload: { print: { command: "gcode_line", param: "M105\n" } },
+  },
+  // Filament unload from extruder (idle only)
+  unload_filament: {
+    subKey: "print",
+    payload: { print: { command: "unload_filament" } },
+  },
+  // Calibration (full self-test) — destructive-ish, only included if explicitly asked
+  calibration: {
+    subKey: "print",
+    payload: { print: { command: "calibration", option: 0 } },
+  },
+  // Clear print error (recover from paused-with-error)
+  clean_print_error: {
+    subKey: "print",
+    payload: { print: { command: "clean_print_error", subtask_id: "0", print_type: "cloud" } },
+  },
+  // Set chamber temperature (X1/X1C)
+  set_chamber_temp: {
+    subKey: "print",
+    payload: { print: { command: "set_ctt", ctt_val: 0 } },
+  },
+};
+
+const SAFE_DEFAULT = ["light_on", "light_off", "speed_standard", "ams_filament", "pushall", "gcode_M105"];
+
+router.post("/admin/metrics/printer/probe", requireAdmin, async (req, res) => {
+  try {
+    const { bambuUid, printerId, commands, timeoutMs = 4000 } = req.body || {};
+    if (!bambuUid || !printerId) {
+      return res.status(400).json({ ok: false, error: "Required: bambuUid, printerId" });
+    }
+    const list = Array.isArray(commands) && commands.length ? commands : SAFE_DEFAULT;
+    const unknown = list.filter((n) => !PROBE_SUITE[n]);
+    if (unknown.length) {
+      return res.status(400).json({
+        ok: false,
+        error: `Unknown probe(s): ${unknown.join(", ")}. Available: ${Object.keys(PROBE_SUITE).join(", ")}`,
+      });
+    }
+
+    const mqttService = require("../services/mqttPrinterService");
+    const results = [];
+
+    for (const name of list) {
+      const spec = PROBE_SUITE[name];
+      // deep clone so we don't mutate the suite definition
+      const payload = JSON.parse(JSON.stringify(spec.payload));
+      const r = await mqttService.probeCommand(String(bambuUid), printerId, payload, spec.subKey, Number(timeoutMs));
+      const verdict = !r.sent
+        ? "not_sent"
+        : r.response == null
+        ? "no_reply"
+        : r.response.result === "success" || r.response.result === undefined
+        ? "ok"
+        : "rejected";
+      results.push({
+        name,
+        subKey: spec.subKey,
+        command: spec.payload[spec.subKey].command,
+        sent: r.sent,
+        seq: r.seq,
+        verdict,
+        took_ms: r.took_ms,
+        result: r.response?.result ?? null,
+        reason: r.response?.reason ?? null,
+        response: r.response, // full echo for inspection
+        error: r.error || null,
+      });
+      log.info(`[PROBE] ${name} → ${verdict} (took ${r.took_ms}ms${r.response?.reason ? `, reason="${r.response.reason}"` : ""})`);
+      // Small breather between commands so we don't pile them on each other
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    res.json({
+      ok: true,
+      bambuUid,
+      printerId,
+      results,
+      summary: {
+        total: results.length,
+        ok: results.filter((r) => r.verdict === "ok").length,
+        no_reply: results.filter((r) => r.verdict === "no_reply").length,
+        rejected: results.filter((r) => r.verdict === "rejected").length,
+        not_sent: results.filter((r) => r.verdict === "not_sent").length,
+      },
+    });
+  } catch (err) {
+    log.error(`[ADMIN] probe error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;

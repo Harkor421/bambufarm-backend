@@ -148,7 +148,7 @@ class PrinterMqttConnection {
    * @param {number} [params.nozzleTempMax]
    */
   setAmsFilament(devId, params) {
-    return this.sendCommand(devId, {
+    const result = this.sendCommand(devId, {
       print: {
         sequence_id: String(this.sequenceId),
         command: "ams_filament_setting",
@@ -161,6 +161,19 @@ class PrinterMqttConnection {
         ...(params.nozzleTempMax != null ? { nozzle_temp_max: params.nozzleTempMax } : {}),
       },
     });
+
+    // Bambu's reply to ams_filament_setting only includes the changed slot,
+    // not the full state. Request a pushall ~500ms later to get the complete
+    // updated state — otherwise our cache could end up with a stale view.
+    setTimeout(() => {
+      try {
+        this.sendCommand(devId, {
+          pushing: { sequence_id: String(this.sequenceId), command: "pushall", version: 1, push_target: 1 },
+        });
+      } catch {}
+    }, 500);
+
+    return result;
   }
 
   /** Set print speed level (1=Silent, 2=Standard, 3=Sport, 4=Ludicrous) */
@@ -178,6 +191,72 @@ class PrinterMqttConnection {
   /** Send raw gcode */
   sendGcode(devId, gcode) {
     return this.sendCommand(devId, { print: { sequence_id: String(this.sequenceId), command: "gcode_line", param: gcode + "\n" } });
+  }
+
+  /**
+   * Send a command and wait for the printer's reply matched by sequence_id.
+   * Used to probe which commands Bambu's cloud broker accepts vs silently
+   * ignores (i.e., which require the bridge's signing).
+   *
+   * `subKey` is the top-level field that holds the command ("print", "system",
+   * "pushing", "info"). Bambu echoes the command back in the same sub-object
+   * with the same sequence_id, often with `result: "success"` or a `reason`.
+   *
+   * Returns { sent, seq, response, took_ms, error? }. `response: null` after
+   * the timeout means Bambu silently dropped the command — usually a sign that
+   * signing is required.
+   */
+  probeCommand(devId, payload, subKey, timeoutMs = 4000) {
+    return new Promise((resolve) => {
+      if (!this.connected || !this.client) {
+        return resolve({ sent: false, seq: null, response: null, took_ms: 0, error: "not connected" });
+      }
+      this.sequenceId++;
+      const seq = String(this.sequenceId);
+      if (!payload[subKey] || typeof payload[subKey] !== "object") {
+        return resolve({ sent: false, seq, response: null, took_ms: 0, error: `payload missing sub-key "${subKey}"` });
+      }
+      payload[subKey].sequence_id = seq;
+
+      const start = Date.now();
+      const expectedTopic = `device/${devId}/report`;
+      let done = false;
+
+      const cleanup = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try { this.client.off("message", listener); } catch {}
+      };
+
+      const listener = (topic, raw) => {
+        if (topic !== expectedTopic) return;
+        let json;
+        try { json = JSON.parse(raw.toString()); } catch { return; }
+        // Match by sequence_id in the same sub-key first, then any sub-object.
+        const candidates = [json[subKey], json.print, json.system, json.info, json.mc_print].filter(Boolean);
+        for (const sub of candidates) {
+          if (String(sub.sequence_id) === seq) {
+            cleanup();
+            return resolve({ sent: true, seq, response: sub, took_ms: Date.now() - start });
+          }
+        }
+      };
+
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve({ sent: true, seq, response: null, took_ms: Date.now() - start });
+      }, timeoutMs);
+
+      this.client.on("message", listener);
+
+      try {
+        this.client.publish(`device/${devId}/request`, JSON.stringify(payload));
+      } catch (err) {
+        cleanup();
+        resolve({ sent: false, seq, response: null, took_ms: 0, error: err.message });
+      }
+    });
   }
 
   // ── Internal ─────────────────────────────────
@@ -205,10 +284,46 @@ class PrinterMqttConnection {
     const p = json.print;
     const prev = this.printerStates.get(devId) || {};
 
-    // Merge incremental update into stored state
+    // Merge incremental update into stored state. Top-level is shallow merge
+    // (Bambu sends incremental updates per-field), but the `ams` field gets a
+    // deeper merge so a partial AMS update doesn't wipe out other slots/units.
+    //
+    // Without this, sending an ams_filament_setting command causes Bambu to
+    // reply with just the changed slot — our shallow merge would replace the
+    // whole `ams.ams[]` array, losing every other unit's data and making the
+    // entire AMS section vanish from the UI until the next full pushall.
     const merged = { ...prev };
     for (const key of Object.keys(p)) {
-      if (p[key] !== undefined && p[key] !== null) merged[key] = p[key];
+      if (p[key] === undefined || p[key] === null) continue;
+      if (key === "ams" && prev.ams && typeof p.ams === "object") {
+        // Deep-merge ams: keep existing units, overlay any included new ones
+        const mergedAms = { ...prev.ams, ...p.ams };
+        if (Array.isArray(p.ams.ams) && Array.isArray(prev.ams.ams)) {
+          // Merge unit arrays by id — partial updates often only include
+          // changed units, so we preserve the others.
+          const byId = new Map();
+          for (const u of prev.ams.ams) byId.set(u.id, u);
+          for (const u of p.ams.ams) {
+            const existing = byId.get(u.id);
+            if (existing && Array.isArray(existing.tray) && Array.isArray(u.tray)) {
+              // Merge tray arrays by id too
+              const trayById = new Map();
+              for (const t of existing.tray) trayById.set(t.id, t);
+              for (const t of u.tray) {
+                const existingTray = trayById.get(t.id);
+                trayById.set(t.id, existingTray ? { ...existingTray, ...t } : t);
+              }
+              byId.set(u.id, { ...existing, ...u, tray: [...trayById.values()] });
+            } else {
+              byId.set(u.id, existing ? { ...existing, ...u } : u);
+            }
+          }
+          mergedAms.ams = [...byId.values()];
+        }
+        merged.ams = mergedAms;
+      } else {
+        merged[key] = p[key];
+      }
     }
     this.printerStates.set(devId, merged);
 
@@ -383,6 +498,12 @@ class MqttPrinterService {
   setAmsFilament(userId, devId, params) {
     const conn = this._findConnectionByUserId(userId);
     return conn ? conn.setAmsFilament(devId, params) : false;
+  }
+
+  async probeCommand(userId, devId, payload, subKey, timeoutMs) {
+    const conn = this._findConnectionByUserId(userId);
+    if (!conn) return { sent: false, seq: null, response: null, took_ms: 0, error: "no MQTT connection for user" };
+    return conn.probeCommand(devId, payload, subKey, timeoutMs);
   }
 
   sendGcode(userId, devId, gcode) {
