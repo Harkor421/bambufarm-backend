@@ -103,6 +103,51 @@ router.post("/printer/light", (req, res) => {
   handleCommand(req, res, "light", () => ({ on: !!on }));
 });
 
+// POST /api/printer/ams-filament — update an AMS slot's color/material/temp
+// Body: { expoPushToken, printerId, amsId, trayId, trayColor, trayType, trayInfoIdx?, nozzleTempMin?, nozzleTempMax? }
+// Bambu only honors this when the printer is IDLE or PAUSE.
+router.post("/printer/ams-filament", async (req, res) => {
+  try {
+    const user = await resolveUser(req, res);
+    if (!user) return;
+    const { printerId, amsId = 0, trayId, trayColor, trayType, trayInfoIdx, nozzleTempMin, nozzleTempMax } = req.body;
+
+    if (!printerId) return res.status(400).json({ ok: false, error: "Missing printerId" });
+    if (trayId == null) return res.status(400).json({ ok: false, error: "Missing trayId" });
+    if (!trayColor || !/^[0-9a-fA-F]{6,8}$/.test(trayColor)) {
+      return res.status(400).json({ ok: false, error: "trayColor must be 6 or 8 char hex (RRGGBB or RRGGBBAA)" });
+    }
+    if (!trayType) return res.status(400).json({ ok: false, error: "Missing trayType" });
+
+    // Pad to 8 chars (RRGGBBAA) — Bambu expects alpha at the end
+    const color = trayColor.length === 6 ? `${trayColor.toUpperCase()}FF` : trayColor.toUpperCase();
+
+    const params = {
+      amsId: Number(amsId),
+      trayId: Number(trayId),
+      trayColor: color,
+      trayType,
+      trayInfoIdx,
+      nozzleTempMin: nozzleTempMin != null ? Number(nozzleTempMin) : undefined,
+      nozzleTempMax: nozzleTempMax != null ? Number(nozzleTempMax) : undefined,
+    };
+
+    log.info(`[CTRL] ams-filament ${printerId}: uid=${user.bambu_uid} ams=${amsId} tray=${trayId} ${trayType} ${color}`);
+
+    // Try bridge first (works for everything), then direct cloud MQTT
+    if (user.bambu_uid && wsManager.isBridgeConnected(user.bambu_uid)) {
+      const result = await wsManager.sendPrinterCommand(user.bambu_uid, printerId, "ams_filament_setting", params);
+      return res.json({ ok: result.success, via: "bridge", error: result.error || null });
+    }
+
+    const sent = mqttService.setAmsFilament(String(user._id), printerId, params);
+    res.json({ ok: sent, via: "mqtt", error: sent ? null : "MQTT not connected" });
+  } catch (err) {
+    log.error(`[CTRL] ams-filament error: ${err.message}`);
+    res.status(500).json({ ok: false, error: "Internal error" });
+  }
+});
+
 // GET /api/printer/mqtt-state — get real-time MQTT state for all printers
 // Accepts expoPushToken OR returns all states (printers are filtered client-side by ID)
 router.get("/printer/mqtt-state", async (req, res) => {
