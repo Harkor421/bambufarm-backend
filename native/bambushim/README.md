@@ -113,17 +113,52 @@ sub-key the plugin requires signing for (which is `print`, but not `system`).
 - `enc_msg: sign_string_internal failed!`
 - `enc_msg: add_sign_info json is empty`
 
-**To unblock signing, you would need to:**
-1. Reverse-engineer the `aes256` encryption format used by the official
-   client (the embedded encrypted cert in `libBambuSource.dylib`'s
-   `embeded_app_cert` and `embeded_base64_encode_app_pri_key_str`), OR
-2. Patch the plugin binary to skip the cert-validity check (illegal under
-   EULA, fragile across plugin updates), OR
-3. Run our backend as a child of an actual signed BambuStudio process and
-   IPC commands through it (huge complexity)
+## Cert Chain Extracted (for reference)
 
-For pause/resume/stop/ams/calibrate/etc, **BambuBridge LAN MQTT remains the
-only viable path**. The local broker accepts `bblp` auth without signing.
+Pulled all PEM-marked certificates out of `libbambu_networking.dylib`:
+
+```
+BBL CA (root, 2022-2032, CN=BBL CA, O=BBL Technologies Co. Ltd, C=CN)
+├── BBL CA2 RSA (intermediate, 2025-2035)
+├── BBL CA2 ECC (intermediate, 2025-2035)
+├── application_root.bambulab.com (intermediate, 2024-2034)
+│   ├── service.bambulab.com (server cert, 2024-2034)
+│   └── GLOF3813734089.bambulab.com (slicer-app intermediate, 2024-2034)
+│       └── GLOF3813734089-55c03bbf0000 (signing leaf cert, Dec 2025-Jun 2027)
+```
+
+The leaf cert `GLOF3813734089-55c03bbf0000` is what the plugin uses to sign
+cloud MQTT `print` commands. The cert IS valid date-wise (2027-06-25) — so
+expiration is not the immediate cause of -2.
+
+## Why Cert Extraction Doesn't Solve It
+
+The matching **private key** for the leaf signing cert is embedded but
+**encrypted with PBKDF2-derived AES** (confirmed by strings `salt`, `iter`,
+`PBKDF2` near `decrypt embeded_base64_encode_app_pri_key_str`). The
+PBKDF2 password is itself embedded somewhere in the binary code (constant
+in a function). Recovering it requires **runtime debugging** (lldb hook on
+PKCS5_PBKDF2_HMAC) or deep static disassembly of the decrypt routine.
+
+Even with the private key extracted, we'd also need to figure out:
+
+1. The `aes256` payload format the plugin sends to
+   `/v1/iot-service/api/user/applications/slicer/cert?aes256=...&ver=1`
+   to refresh the cert when needed (server returns "outdated" otherwise).
+2. The CRL (Certificate Revocation List) — also embedded encrypted as
+   `embeded_app_crl_str`. Bambu may have **revoked the leaf cert in the
+   embedded CRL** as a force-update mechanism, in which case the plugin
+   refuses to use it even though it's date-valid.
+3. The exact MQTT signing format — which fields go in `add_sign_info`,
+   what gets HMAC'd vs RSA-signed, where the signature is appended.
+
+**Estimated work to crack:** several days of focused RE with lldb +
+Hopper/Ghidra. Outcome uncertain — even if all three above are solved,
+Bambu can rotate the embedded keys in the next plugin release (~quarterly)
+and break everything overnight.
+
+**The realistic path remains BambuBridge.** The plugin is a dead-end for
+backend-side automation regardless of how clever the FFI shim gets.
 
 **For pause/resume/stop/ams/calibrate/etc., BambuBridge (LAN MQTT) remains
 the only viable path.** The local broker accepts commands with `bblp` auth
