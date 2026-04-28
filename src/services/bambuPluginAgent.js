@@ -60,8 +60,7 @@ function bind() {
     is_server_connected:    l.func("int   shim_is_server_connected(void* agent)"),
     connect_printer:        l.func("int   shim_connect_printer(void* agent, const char* dev_id, const char* dev_ip, const char* username, const char* password, int use_ssl)"),
     disconnect_printer:     l.func("int   shim_disconnect_printer(void* agent)"),
-    send_message:           l.func("int   shim_send_message(void* agent, const char* dev_id, const char* json_str, int qos)"),
-    send_message_v5:        l.func("int   shim_send_message_v5(void* agent, const char* dev_id, const char* json_str, int qos, int flag)"),
+    send_message:           l.func("int   shim_send_message_v5(void* agent, const char* dev_id, const char* json_str, int qos, int flag)"),
     send_message_to_printer:l.func("int   shim_send_message_to_printer(void* agent, const char* dev_id, const char* json_str, int qos, int flag)"),
     install_device_cert:    l.func("void  shim_install_device_cert(void* agent, const char* dev_id, int lan_only)"),
     is_user_login:          l.func("int   shim_is_user_login(void* agent)"),
@@ -225,9 +224,10 @@ class BambuAgent {
    */
   sendCloudMessage(devId, json, { qos = 1, flag = 0 } = {}) {
     const payload = typeof json === "string" ? json : JSON.stringify(json);
-    // Use 5-arg ABI per jarczak's BridgeCoreMethodManifest:
-    // `int (*)(void*, std::string, std::string, int, int)` for bambu_network_send_message
-    return this.fns.send_message_v5(this.agentPtr, devId, payload, qos, flag);
+    // 5-arg ABI (per jarczak's BridgeCoreMethodManifest), bound under the
+    // unified `send_message` slot to avoid duplicate koffi bindings to the
+    // same underlying symbol (which corrupts plugin state).
+    return this.fns.send_message(this.agentPtr, devId, payload, qos, flag);
   }
 
   isUserLogin()              { return !!this.fns.is_user_login(this.agentPtr); }
