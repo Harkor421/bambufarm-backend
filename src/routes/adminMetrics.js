@@ -946,6 +946,25 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
     }
     trace("add_subscribe", agent.addSubscribe(printerId));
     trace("set_user_selected_machine", agent.setUserSelectedMachine(printerId));
+    trace("install_device_cert", agent.fns.install_device_cert(agent.agentPtr, printerId, 0));
+    trace("update_cert", agent.updateCert());
+
+    // Quick network test — can WE reach the Bambu cert endpoint at all from this server?
+    try {
+      const axios = require("axios");
+      const KEY = require("crypto").randomBytes(32).toString("hex");
+      const r = await axios.get(`https://api.bambulab.com/v1/iot-service/api/user/applications/slicer/cert?aes256=${KEY}&ver=1`, {
+        headers: { Authorization: `Bearer ${token}` },
+        validateStatus: () => true,
+        timeout: 5000,
+      });
+      trace("our_direct_cert_request", { status: r.status, body: typeof r.data === "string" ? r.data.slice(0, 200) : JSON.stringify(r.data).slice(0, 200) });
+    } catch (e) {
+      trace("our_direct_cert_request_error", e.message);
+    }
+
+    // Wait extra after subscribes for plugin to settle
+    await new Promise((r) => setTimeout(r, 2000));
 
     // Build command
     let cmd;
