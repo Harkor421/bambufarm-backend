@@ -865,6 +865,8 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
       } catch {}
     };
 
+    require("fs").mkdirSync("/tmp/bambu-agent-log/log", { recursive: true });
+    require("fs").mkdirSync("/tmp/bambu-agent-config", { recursive: true });
     agent.create("/tmp/bambu-agent-log");
     agent.registerCallbacks();
     agent.setCountryCodeCallback("US");
