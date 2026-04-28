@@ -892,8 +892,7 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
       });
     });
     return;
-    // (rest of old in-process code below is unreachable now — kept for ref)
-    // eslint-disable-next-line no-unreachable
+    /* dead code — old in-process probe path; replaced by child_process above
     let BambuAgent;
 
     const responses = [];
@@ -1048,10 +1047,11 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
     log.error(`[ADMIN] probe-via-plugin error: ${err.message}\n${err.stack}`);
     res.status(500).json({ ok: false, error: err.message, stack: err.stack });
   } finally {
-    // NOTE: do NOT call agent.destroy() — Bambu's plugin crashes the entire
-    // process when the agent is destroyed before going through proper logout.
-    // We accept the per-call leak for this debug/test endpoint. In production
-    // we'd hold a single long-lived agent instance.
+    // (no destroy — plugin crashes process on cleanup)
+  }
+  */
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, stack: err.stack });
   }
 });
 
