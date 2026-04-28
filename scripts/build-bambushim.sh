@@ -27,6 +27,11 @@ curl -L -sS -o /tmp/bambu_linux.zip "https://public-cdn.bblmw.com/upgrade/studio
 unzip -q -o /tmp/bambu_linux.zip -d vendor/bambu/linux/
 ls -la vendor/bambu/linux/
 
+echo "[bambushim] downloading Bambu's slicer_base64.cer (TLS root for Bambu cloud)"
+mkdir -p vendor/bambu/cert
+curl -L -sS -o vendor/bambu/cert/slicer_base64.cer "https://raw.githubusercontent.com/bambulab/BambuStudio/master/resources/cert/slicer_base64.cer"
+ls -la vendor/bambu/cert/
+
 echo "[bambushim] compiling shim against plugin"
 g++ -std=c++17 -shared -fPIC -O2 \
   -o native/bambushim/libbambushim.so \

@@ -872,13 +872,18 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
     agent.setCountryCodeCallback("US");
     agent.initLog();
     agent.setConfigDir("/tmp/bambu-agent-config");
-    // System CA bundle on Debian (Railway nixpacks)
+    // Use BambuStudio's bundled cert (downloaded by build-bambushim.sh)
+    // Falls back to system CA bundle if missing.
     const fs = require("fs");
-    const certCandidates = ["/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem", "/etc/pki/tls/certs/ca-bundle.crt"];
-    const certPath = certCandidates.find((p) => fs.existsSync(p)) || "/etc/ssl/certs";
-    const certDir = certPath.substring(0, certPath.lastIndexOf("/"));
-    const certFile = certPath.substring(certPath.lastIndexOf("/") + 1);
-    agent.setCertFile(certDir, certFile);
+    const path = require("path");
+    const bambuCertPath = path.join(__dirname, "..", "..", "vendor", "bambu", "cert", "slicer_base64.cer");
+    if (fs.existsSync(bambuCertPath)) {
+      agent.setCertFile(path.dirname(bambuCertPath), path.basename(bambuCertPath));
+    } else {
+      const certCandidates = ["/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"];
+      const certPath = certCandidates.find((p) => fs.existsSync(p)) || "/etc/ssl/certs";
+      agent.setCertFile(path.dirname(certPath), path.basename(certPath));
+    }
     agent.setExtraHttpHeaders({
       "X-BBL-Client-Type": "slicer",
       "X-BBL-Client-Name": "BambuStudio",
@@ -907,10 +912,23 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
       try { return JSON.parse(userPrintInfo.body); } catch { return {}; }
     })();
     const ownedPrinters = userInfoJson.devices || [];
+    // If no printerId given, try to use the first owned printer from the
+    // get_user_print_info call. If that call failed too, fall back to any
+    // printer this user owns from our DB so we can still try to send.
     if (!printerId) {
       const dev = ownedPrinters[0];
-      if (!dev) return res.json({ ok: false, step: "get_user_print_info", body: userPrintInfo });
-      printerId = dev.dev_id;
+      if (dev) {
+        printerId = dev.dev_id;
+      } else {
+        // Fallback: pick from our own printer DB
+        const PrinterState = require("../db/models/PrinterState");
+        const ps = await PrinterState.findOne({ user_id: targetUser._id }).lean();
+        if (ps) printerId = ps.printer_id;
+      }
+      if (!printerId) {
+        return res.json({ ok: false, step: "no_printer_available",
+          get_user_print_info: userPrintInfo });
+      }
     }
     agent.addSubscribe(printerId);
     agent.setUserSelectedMachine(printerId);
