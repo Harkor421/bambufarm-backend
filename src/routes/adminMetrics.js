@@ -793,13 +793,4 @@ router.post("/admin/metrics/printer/probe", requireAdmin, async (req, res) => {
   }
 });
 
-
-if (r.status === 200) {
-        return res.json({ ok: true, bambu_uid: u.bambu_uid, access_token: fresh, refresh_token: u.bambu_refresh_token, profile: r.data });
-      }
-    } catch {}
-  }
-  res.status(503).json({ ok: false, error: "no working token" });
-});
-
 module.exports = router;
