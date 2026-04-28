@@ -867,11 +867,20 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
 
     require("fs").mkdirSync("/tmp/bambu-agent-log/log", { recursive: true });
     require("fs").mkdirSync("/tmp/bambu-agent-config", { recursive: true });
-    agent.create("/tmp/bambu-agent-log");
+    const diag = { steps: [] };
+    const trace = (k, v) => diag.steps.push({ [k]: v });
+
+    agent.events.onUserLogin = (online, login) => trace("[CB] onUserLogin", { online, login });
+    agent.events.onServerConnected = (rc, reason) => trace("[CB] onServerConnected", { rc, reason });
+    agent.events.onSubscribeFailure = (topic) => trace("[CB] onSubscribeFailure", { topic });
+    agent.events.onHttpError = (code, body) => trace("[CB] onHttpError", { code, body: (body||"").slice(0,400) });
+    agent.events.onPrinterConnected = (topic) => trace("[CB] onPrinterConnected", { topic });
+
+    trace("create_agent", agent.create("/tmp/bambu-agent-log"));
     agent.registerCallbacks();
-    agent.setCountryCodeCallback("US");
-    agent.initLog();
-    agent.setConfigDir("/tmp/bambu-agent-config");
+    trace("set_country_code_callback", agent.setCountryCodeCallback("US"));
+    trace("init_log", agent.initLog());
+    trace("set_config_dir", agent.setConfigDir("/tmp/bambu-agent-config"));
     // Use BambuStudio's bundled cert (downloaded by build-bambushim.sh)
     // Falls back to system CA bundle if missing.
     const fs = require("fs");
@@ -891,23 +900,28 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
       "X-BBL-OS-Type": "linux",
       "X-BBL-OS-Version": "5.x",
     });
-    agent.setCountryCode("US");
-    agent.enableMultiMachine(true);
-    agent.start();
-    agent.changeUser({
+    trace("set_country_code", agent.setCountryCode("US"));
+    trace("enable_multi_machine", agent.enableMultiMachine(true));
+    trace("start", agent.start());
+    trace("change_user", agent.changeUser({
       accessToken: token,
       refreshToken: targetUser.bambu_refresh_token,
       uid: bambuUid,
       account: profile.account || "",
       name: profile.name || "",
-    });
-    agent.connectServer();
+    }));
+    trace("is_user_login_immediately_after", agent.isUserLogin());
+    trace("connect_server", agent.connectServer());
 
     // Wait for connection
-    await new Promise((r) => setTimeout(r, 2500));
+    await new Promise((r) => setTimeout(r, 3000));
 
-    agent.startSubscribe("app");
+    trace("is_user_login_after_3s", agent.isUserLogin());
+    trace("is_server_connected_after_3s", agent.isServerConnected());
+
+    trace("start_subscribe(app)", agent.startSubscribe("app"));
     const userPrintInfo = agent.getUserPrintInfo();
+    trace("get_user_print_info", { http: userPrintInfo.httpCode, body_len: userPrintInfo.body.length, body_preview: userPrintInfo.body.slice(0, 200) });
     const userInfoJson = (() => {
       try { return JSON.parse(userPrintInfo.body); } catch { return {}; }
     })();
@@ -930,8 +944,8 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
           get_user_print_info: userPrintInfo });
       }
     }
-    agent.addSubscribe(printerId);
-    agent.setUserSelectedMachine(printerId);
+    trace("add_subscribe", agent.addSubscribe(printerId));
+    trace("set_user_selected_machine", agent.setUserSelectedMachine(printerId));
 
     // Build command
     let cmd;
@@ -968,6 +982,7 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
              : sendResult === -2 ? "❌ plugin REFUSED to publish (-2 = no app_cert / signing failed)"
              : `unknown code ${sendResult}`,
       printer_responses: responses,
+      diagnostics: diag.steps,
     });
   } catch (err) {
     log.error(`[ADMIN] probe-via-plugin error: ${err.message}\n${err.stack}`);
