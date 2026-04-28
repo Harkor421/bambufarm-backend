@@ -80,6 +80,7 @@ function bind() {
     del_subscribe_one:           l.func("int shim_del_subscribe_one(void* agent, const char* dev_id)"),
     set_user_selected_machine:   l.func("int shim_set_user_selected_machine(void* agent, const char* dev_id)"),
     set_on_subscribe_failure_fn: l.func("int shim_set_on_subscribe_failure_fn(void* agent, void* cb)"),
+    set_extra_http_headers:      l.func("int shim_set_extra_http_headers(void* agent, const char** kv_pairs, int count)"),
   };
 
   // koffi callback prototypes — must match the C typedefs in bambushim.cpp.
@@ -169,6 +170,20 @@ class BambuAgent {
   addSubscribe(devId)                { return this.fns.add_subscribe_one(this.agentPtr, devId); }
   delSubscribe(devId)                { return this.fns.del_subscribe_one(this.agentPtr, devId); }
   setUserSelectedMachine(devId)      { return this.fns.set_user_selected_machine(this.agentPtr, devId); }
+
+  /** Set HTTP headers like BambuStudio does — X-BBL-Client-Type=slicer, etc.
+   *  Without these, Bambu may treat us as an unauthorized client. */
+  setExtraHttpHeaders(headers) {
+    const entries = Object.entries(headers);
+    const flat = [];
+    for (const [k, v] of entries) { flat.push(k); flat.push(String(v)); }
+    // koffi expects a pointer-to-array of strings
+    const arr = koffi.alloc("char*", flat.length);
+    for (let i = 0; i < flat.length; i++) {
+      koffi.encode(arr, i * koffi.sizeof("char*"), "char*", flat[i]);
+    }
+    return this.fns.set_extra_http_headers(this.agentPtr, arr, entries.length);
+  }
 
   /**
    * Create the underlying network agent instance. `logDir` is where the

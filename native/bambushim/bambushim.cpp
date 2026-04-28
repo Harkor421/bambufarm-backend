@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,8 @@ extern "C" {
     int  bambu_network_del_subscribe(void* agent, std::vector<std::string> dev_list);
     int  bambu_network_set_user_selected_machine(void* agent, std::string dev_id);
     int  bambu_network_refresh_connection(void* agent);
+    int  bambu_network_set_extra_http_header(void* agent,
+                                              std::map<std::string, std::string> extra_headers);
 
     using OnSubscribeFailureFn = std::function<void(std::string topic)>;
     int  bambu_network_set_on_subscribe_failure_fn(void* agent, OnSubscribeFailureFn fn);
@@ -292,6 +295,18 @@ int shim_del_subscribe_one(void* agent, const char* dev_id) {
 
 int shim_set_user_selected_machine(void* agent, const char* dev_id) {
     return bambu_network_set_user_selected_machine(agent, std::string(dev_id ? dev_id : ""));
+}
+
+// set_extra_http_header takes std::map. We accept alternating key/value strings
+// (NULL-terminated array: keys[0], vals[0], keys[1], vals[1], ..., NULL).
+int shim_set_extra_http_headers(void* agent, const char* const* kv_pairs, int count) {
+    std::map<std::string, std::string> m;
+    for (int i = 0; i < count; ++i) {
+        const char* k = kv_pairs[i * 2];
+        const char* v = kv_pairs[i * 2 + 1];
+        if (k && v) m[std::string(k)] = std::string(v);
+    }
+    return bambu_network_set_extra_http_header(agent, m);
 }
 
 typedef void (*c_on_subscribe_failure)(const char* topic);

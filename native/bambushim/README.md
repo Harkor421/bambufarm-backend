@@ -63,12 +63,30 @@ After full callback wiring, `connect_printer`, `add_subscribe`, and
 | `print/ams_filament_setting` | ❌ → -2 | Plugin refuses client-side |
 | `print/gcode_line` | ❌ → -2 | Plugin refuses client-side |
 
+**Definitive test:** We replicated BambuStudio's *exact* code path verbatim:
+- `set_extra_http_header` with `X-BBL-Client-Type: slicer` etc. (the missing
+  piece we added on second pass)
+- `start_subscribe("app")` (not "device")
+- `qos=1` for control commands
+- `pause` payload with `param: ""` (per BambuStudio source)
+- `connect_printer` with empty LAN params (cloud mode signal)
+- `set_user_selected_machine`
+
+Every `print` sub-key command still returns -2. `system/ledctrl` still works.
+
 **Conclusion:** Bambu's "Authorization Control System" (rolled out in 2024
-firmware updates) **hardened the network plugin to refuse signing arbitrary
-`print` sub-key commands** via the generic send_message API. The plugin
-embeds the signing cert but only USES it for the dedicated
-`bambu_network_start_print` workflow — runtime control commands are blocked
-client-side regardless of caller.
+firmware updates) **enforces a binary-level signature check on the parent
+process**. Confirmed by:
+
+1. The block survives all the same setup BambuStudio does
+2. Bambu's own blog post said they would verify "software signatures of callers"
+3. OrcaSlicer users reporting same exact -2 failures even with current versions
+4. Apple's `SecCodeCheckValidity()` / Win's `WinVerifyTrust()` are the obvious
+   way to enforce this and require exactly the kind of cert Bambu has but we don't
+
+**For pause/resume/stop/ams/calibrate/etc., BambuBridge (LAN MQTT) remains
+the only viable path.** The local broker accepts commands with `bblp` auth
+without signing — same approach OrcaSlicer falls back to.
 
 This matches the OrcaSlicer issue #9303 reports: third-party tools that used
 to work for pause/resume stopped working after firmware updates, even though
