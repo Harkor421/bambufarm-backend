@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "jest --verbose"
+    "test": "jest --verbose",
+    "postinstall": "bash scripts/build-bambushim.sh || true"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
