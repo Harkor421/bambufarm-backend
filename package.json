@@ -19,6 +19,7 @@
     "form-data": "^4.0.5",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.3",
+    "koffi": "^2.16.1",
     "mongoose": "^8.5.0",
     "mqtt": "^5.15.0",
     "ws": "^8.19.0"
