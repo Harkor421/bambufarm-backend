@@ -814,7 +814,7 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
   // Run the plugin in a child process so any crash/hang doesn't take down
   // the main server.
   try {
-    const { command = "light_off" } = req.body || {};
+    const { command = "light_off", bneB64 } = req.body || {};
     let { bambuUid, printerId } = req.body || {};
 
     // 1. Find a user with a working refresh token + at least one owned printer
@@ -869,6 +869,7 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
       name: profile.name || "",
       printerId,
       command,
+      bneB64,  // optional cached BambuNetworkEngine.conf
     });
 
     const child = execFile("node", [probeScript, probeArg], {

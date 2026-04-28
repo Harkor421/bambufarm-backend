@@ -25,6 +25,12 @@ const log = (k, v) => { result.diagnostics.push({ [k]: v }); process.stderr.writ
 
     fs.mkdirSync("/tmp/bambu-agent-log/log", { recursive: true });
     fs.mkdirSync("/tmp/bambu-agent-config", { recursive: true });
+    // Inject cached BambuNetworkEngine.conf if provided (user's local BS install)
+    if (cfg.bneB64) {
+      const buf = Buffer.from(cfg.bneB64, "base64");
+      fs.writeFileSync("/tmp/bambu-agent-config/BambuNetworkEngine.conf", buf);
+      log("injected_BambuNetworkEngine_conf", { bytes: buf.length });
+    }
 
     const agent = new BambuAgent();
     agent.events.onUserLogin = (online, login) => log("[CB] onUserLogin", { online, login });
