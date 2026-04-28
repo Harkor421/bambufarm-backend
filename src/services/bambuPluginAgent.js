@@ -60,7 +60,8 @@ function bind() {
     is_server_connected:    l.func("int   shim_is_server_connected(void* agent)"),
     connect_printer:        l.func("int   shim_connect_printer(void* agent, const char* dev_id, const char* dev_ip, const char* username, const char* password, int use_ssl)"),
     disconnect_printer:     l.func("int   shim_disconnect_printer(void* agent)"),
-    send_message:           l.func("int   shim_send_message(void* agent, const char* dev_id, const char* json_str, int qos, int flag)"),
+    send_message:           l.func("int   shim_send_message(void* agent, const char* dev_id, const char* json_str, int qos)"),
+    send_message_v5:        l.func("int   shim_send_message_v5(void* agent, const char* dev_id, const char* json_str, int qos, int flag)"),
     send_message_to_printer:l.func("int   shim_send_message_to_printer(void* agent, const char* dev_id, const char* json_str, int qos, int flag)"),
     install_device_cert:    l.func("void  shim_install_device_cert(void* agent, const char* dev_id, int lan_only)"),
     is_user_login:          l.func("int   shim_is_user_login(void* agent)"),
@@ -81,6 +82,8 @@ function bind() {
     set_user_selected_machine:   l.func("int shim_set_user_selected_machine(void* agent, const char* dev_id)"),
     set_on_subscribe_failure_fn: l.func("int shim_set_on_subscribe_failure_fn(void* agent, void* cb)"),
     set_extra_http_headers:      l.func("int shim_set_extra_http_headers(void* agent, const char** kv_pairs, int count)"),
+    get_user_print_info:         l.func("int shim_get_user_print_info(void* agent, char* out_body, int out_body_size)"),
+    update_cert:                 l.func("int shim_update_cert(void* agent)"),
   };
 
   // koffi callback prototypes — must match the C typedefs in bambushim.cpp.
@@ -171,6 +174,17 @@ class BambuAgent {
   delSubscribe(devId)                { return this.fns.del_subscribe_one(this.agentPtr, devId); }
   setUserSelectedMachine(devId)      { return this.fns.set_user_selected_machine(this.agentPtr, devId); }
 
+  updateCert() { return this.fns.update_cert(this.agentPtr); }
+
+  /** Fetch user's owned printer list — REQUIRED for send_message of print
+   *  commands to work. Plugin uses internal list to validate device ownership. */
+  getUserPrintInfo() {
+    const buf = Buffer.alloc(256 * 1024);
+    const httpCode = this.fns.get_user_print_info(this.agentPtr, buf, buf.length);
+    const nul = buf.indexOf(0);
+    return { httpCode, body: buf.slice(0, nul >= 0 ? nul : buf.length).toString("utf8") };
+  }
+
   /** Set HTTP headers like BambuStudio does — X-BBL-Client-Type=slicer, etc.
    *  Without these, Bambu may treat us as an unauthorized client. */
   setExtraHttpHeaders(headers) {
@@ -206,10 +220,12 @@ class BambuAgent {
   /**
    * Send a JSON command via cloud MQTT. The plugin signs it with the
    * embedded device cert before publishing — this is the whole point.
+   * Uses the LEGACY 4-arg ABI by default (matches OrcaSlicer behavior, since
+   * NetworkAgent::use_legacy_network defaults to true).
    */
-  sendCloudMessage(devId, json, { qos = 0, flag = 0 } = {}) {
+  sendCloudMessage(devId, json, { qos = 1 } = {}) {
     const payload = typeof json === "string" ? json : JSON.stringify(json);
-    return this.fns.send_message(this.agentPtr, devId, payload, qos, flag);
+    return this.fns.send_message(this.agentPtr, devId, payload, qos);
   }
 
   isUserLogin()              { return !!this.fns.is_user_login(this.agentPtr); }

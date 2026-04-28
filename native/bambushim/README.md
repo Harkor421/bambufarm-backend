@@ -63,26 +63,67 @@ After full callback wiring, `connect_printer`, `add_subscribe`, and
 | `print/ams_filament_setting` | ❌ → -2 | Plugin refuses client-side |
 | `print/gcode_line` | ❌ → -2 | Plugin refuses client-side |
 
-**Definitive test:** We replicated BambuStudio's *exact* code path verbatim:
-- `set_extra_http_header` with `X-BBL-Client-Type: slicer` etc. (the missing
-  piece we added on second pass)
+**Definitive test:** We replicated BambuStudio's *exact* code path verbatim
+across multiple test rounds:
+- `set_extra_http_header` with `X-BBL-Client-Type: slicer` etc.
 - `start_subscribe("app")` (not "device")
 - `qos=1` for control commands
-- `pause` payload with `param: ""` (per BambuStudio source)
-- `connect_printer` with empty LAN params (cloud mode signal)
+- `pause` payload with `param: ""`
+- `connect_printer` with both empty LAN params AND real access_code from
+  `get_user_print_info`
 - `set_user_selected_machine`
+- `install_device_cert`
+- `update_cert`
+- `set_cert_file` with both `/etc/ssl/cert.pem` AND BambuStudio's official
+  `slicer_base64.cer`
+- Both plugin v01.10.00.07 (from 2023) AND v02.06.00.50 (current latest)
+- Both legacy 4-arg ABI AND new 5-arg ABI for `send_message`
 
-Every `print` sub-key command still returns -2. `system/ledctrl` still works.
+Every `print` sub-key command still returns -2. `system/ledctrl` still works
+and printer responds with `result:"success"`.
 
-**Conclusion:** Bambu's "Authorization Control System" (rolled out in 2024
-firmware updates) **enforces a binary-level signature check on the parent
-process**. Confirmed by:
+**Root cause (identified via binary string analysis):** The plugin's signing
+flow requires fetching a per-session `app_cert` from Bambu's HTTP endpoint:
 
-1. The block survives all the same setup BambuStudio does
-2. Bambu's own blog post said they would verify "software signatures of callers"
-3. OrcaSlicer users reporting same exact -2 failures even with current versions
-4. Apple's `SecCodeCheckValidity()` / Win's `WinVerifyTrust()` are the obvious
-   way to enforce this and require exactly the kind of cert Bambu has but we don't
+```
+GET https://api.bambulab.com/v1/iot-service/api/user/applications/slicer/cert?aes256=<encrypted_payload>&ver=1
+```
+
+The `aes256` query parameter is an **encrypted payload that only the official
+Bambu Connect / signed BambuStudio binary knows how to construct**. Bambu's
+server validates the payload format/signature — for any other request it
+returns:
+
+```
+{"code":101,"error":"This application is outdated. Please update it to the latest version."}
+```
+
+This is what we get when calling that endpoint directly, regardless of
+client headers (`X-BBL-Client-Version`, `User-Agent`, etc).
+
+The plugin internally tries this fetch when start() runs and silently fails
+when the response is "outdated". Without a valid app_cert, `add_sign_info`
+(plugin internal) returns failure → `send_message` returns -2 for any
+sub-key the plugin requires signing for (which is `print`, but not `system`).
+
+**Diagnostic strings found in libbambu_networking.dylib:**
+- `enc_msg: get_app_cert ok` / `enc_msg: get_app_cert failed`
+- `enc_msg: app_cert is expired`
+- `enc_msg: add sign info failed`
+- `enc_msg: sign_string_internal failed!`
+- `enc_msg: add_sign_info json is empty`
+
+**To unblock signing, you would need to:**
+1. Reverse-engineer the `aes256` encryption format used by the official
+   client (the embedded encrypted cert in `libBambuSource.dylib`'s
+   `embeded_app_cert` and `embeded_base64_encode_app_pri_key_str`), OR
+2. Patch the plugin binary to skip the cert-validity check (illegal under
+   EULA, fragile across plugin updates), OR
+3. Run our backend as a child of an actual signed BambuStudio process and
+   IPC commands through it (huge complexity)
+
+For pause/resume/stop/ams/calibrate/etc, **BambuBridge LAN MQTT remains the
+only viable path**. The local broker accepts `bblp` auth without signing.
 
 **For pause/resume/stop/ams/calibrate/etc., BambuBridge (LAN MQTT) remains
 the only viable path.** The local broker accepts commands with `bblp` auth

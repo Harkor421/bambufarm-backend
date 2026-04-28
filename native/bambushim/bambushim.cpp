@@ -82,6 +82,12 @@ extern "C" {
     int  bambu_network_set_extra_http_header(void* agent,
                                               std::map<std::string, std::string> extra_headers);
 
+    int  bambu_network_get_user_print_info(void* agent, unsigned int* http_code,
+                                           std::string* http_body);
+    // update_cert refreshes the app cert from Bambu's server — required for
+    // the plugin to be able to sign 'print' commands.
+    int  bambu_network_update_cert(void* agent);
+
     using OnSubscribeFailureFn = std::function<void(std::string topic)>;
     int  bambu_network_set_on_subscribe_failure_fn(void* agent, OnSubscribeFailureFn fn);
 }
@@ -141,19 +147,23 @@ int shim_disconnect_printer(void* agent) {
     return bambu_network_disconnect_printer(agent);
 }
 
-int shim_send_message(void* agent, const char* dev_id, const char* json_str,
-                       int qos, int flag) {
+// 5-arg variant (newer plugin ABI)
+int shim_send_message_v5(void* agent, const char* dev_id, const char* json_str,
+                          int qos, int flag) {
     return bambu_network_send_message(agent,
         std::string(dev_id ? dev_id : ""),
         std::string(json_str ? json_str : ""),
         qos, flag);
 }
 
-// Legacy (4-arg, no flag) variant — older plugins use this ABI
+// Legacy 4-arg variant — what OrcaSlicer's BBLPrinterAgent calls by default
+// (m_use_legacy_network defaults to true). The plugin we have at version
+// 02.06.00.50 IS the legacy ABI — calling with 5 args makes the plugin treat
+// the extra arg as garbage and reject the request.
 extern "C" int bambu_network_send_message_legacy(void* agent, std::string dev_id,
                                                  std::string json_str, int qos)
     __asm__("_bambu_network_send_message");
-int shim_send_message_legacy(void* agent, const char* dev_id, const char* json_str, int qos) {
+int shim_send_message(void* agent, const char* dev_id, const char* json_str, int qos) {
     return bambu_network_send_message_legacy(agent,
         std::string(dev_id ? dev_id : ""),
         std::string(json_str ? json_str : ""),
@@ -295,6 +305,25 @@ int shim_del_subscribe_one(void* agent, const char* dev_id) {
 
 int shim_set_user_selected_machine(void* agent, const char* dev_id) {
     return bambu_network_set_user_selected_machine(agent, std::string(dev_id ? dev_id : ""));
+}
+
+int shim_update_cert(void* agent) {
+    return bambu_network_update_cert(agent);
+}
+
+// Fetch the user's owned printer list from Bambu cloud. Plugin stores it
+// internally and uses it to validate send_message calls. THIS IS REQUIRED
+// before send_message of print commands will work.
+int shim_get_user_print_info(void* agent, char* out_body, int out_body_size) {
+    unsigned int http_code = 0;
+    std::string body;
+    int rc = bambu_network_get_user_print_info(agent, &http_code, &body);
+    if (out_body && out_body_size > 0) {
+        size_t n = body.size() < (size_t)(out_body_size - 1) ? body.size() : (out_body_size - 1);
+        std::memcpy(out_body, body.data(), n);
+        out_body[n] = 0;
+    }
+    return rc < 0 ? rc : (int)http_code;
 }
 
 // set_extra_http_header takes std::map. We accept alternating key/value strings
