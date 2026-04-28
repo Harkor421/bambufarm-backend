@@ -223,9 +223,11 @@ class BambuAgent {
    * Uses the LEGACY 4-arg ABI by default (matches OrcaSlicer behavior, since
    * NetworkAgent::use_legacy_network defaults to true).
    */
-  sendCloudMessage(devId, json, { qos = 1 } = {}) {
+  sendCloudMessage(devId, json, { qos = 1, flag = 0 } = {}) {
     const payload = typeof json === "string" ? json : JSON.stringify(json);
-    return this.fns.send_message(this.agentPtr, devId, payload, qos);
+    // Use 5-arg ABI per jarczak's BridgeCoreMethodManifest:
+    // `int (*)(void*, std::string, std::string, int, int)` for bambu_network_send_message
+    return this.fns.send_message_v5(this.agentPtr, devId, payload, qos, flag);
   }
 
   isUserLogin()              { return !!this.fns.is_user_login(this.agentPtr); }
