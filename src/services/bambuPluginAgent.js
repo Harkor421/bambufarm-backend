@@ -78,6 +78,8 @@ function bind() {
     enable_multi_machine:        l.func("void shim_enable_multi_machine(void* agent, int enable)"),
     add_subscribe_one:           l.func("int shim_add_subscribe_one(void* agent, const char* dev_id)"),
     del_subscribe_one:           l.func("int shim_del_subscribe_one(void* agent, const char* dev_id)"),
+    set_user_selected_machine:   l.func("int shim_set_user_selected_machine(void* agent, const char* dev_id)"),
+    set_on_subscribe_failure_fn: l.func("int shim_set_on_subscribe_failure_fn(void* agent, void* cb)"),
   };
 
   // koffi callback prototypes — must match the C typedefs in bambushim.cpp.
@@ -87,6 +89,7 @@ function bind() {
     onPrinterConnected: koffi.proto("on_printer_connected_t", "void", ["str"]),
     onMessage:          koffi.proto("on_message_t", "void", ["str", "str"]),
     onHttpError:        koffi.proto("on_http_error_t", "void", ["uint", "str"]),
+    onSubscribeFailure: koffi.proto("on_subscribe_failure_t", "void", ["str"]),
   };
   return bound;
 }
@@ -104,6 +107,7 @@ class BambuAgent {
       onPrinterConnected: null,
       onMessage: null,
       onHttpError: null,
+      onSubscribeFailure: null,
     };
   }
 
@@ -140,11 +144,18 @@ class BambuAgent {
         catch (e) { console.error("[bambuPluginAgent] onHttpError handler:", e.message); }
       });
 
+    const ptrSF = reg("onSubscribeFailure", this.fns._cbProto.onSubscribeFailure,
+      (topic) => {
+        try { this.events.onSubscribeFailure && this.events.onSubscribeFailure(topic); }
+        catch (e) { console.error("[bambuPluginAgent] onSubscribeFailure handler:", e.message); }
+      });
+
     this.fns.set_on_user_login_fn(this.agentPtr, ptrUL);
     this.fns.set_on_server_connected_fn(this.agentPtr, ptrSC);
     this.fns.set_on_printer_connected_fn(this.agentPtr, ptrPC);
     this.fns.set_on_message_fn(this.agentPtr, ptrM);
     this.fns.set_on_http_error_fn(this.agentPtr, ptrHE);
+    this.fns.set_on_subscribe_failure_fn(this.agentPtr, ptrSF);
   }
 
   /** Set the country-code provider — plugin asks via callback synchronously. */
@@ -157,6 +168,7 @@ class BambuAgent {
   enableMultiMachine(enable = true)  { return this.fns.enable_multi_machine(this.agentPtr, enable ? 1 : 0); }
   addSubscribe(devId)                { return this.fns.add_subscribe_one(this.agentPtr, devId); }
   delSubscribe(devId)                { return this.fns.del_subscribe_one(this.agentPtr, devId); }
+  setUserSelectedMachine(devId)      { return this.fns.set_user_selected_machine(this.agentPtr, devId); }
 
   /**
    * Create the underlying network agent instance. `logDir` is where the

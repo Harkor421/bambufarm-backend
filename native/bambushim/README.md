@@ -49,35 +49,39 @@ node -e "const { BambuAgent } = require('../../src/services/bambuPluginAgent'); 
 - `add_subscribe` and `start_subscribe` return 0
 - `set_cert_file('/etc/ssl', 'cert.pem')` is REQUIRED for MQTT TLS to validate
 
-## Known Blocker (last 5%)
+## Final Finding: Plugin Refuses to Sign `print` Commands
 
-`send_message(devId, jsonString, qos, flag)` returns `-2` on every call,
-even after subscribing and waiting for confirmation. Possible causes (all
-unverified — plugin logs are encrypted):
+After full callback wiring, `connect_printer`, `add_subscribe`, and
+`set_user_selected_machine`, we confirmed:
 
-1. **Subscription ack not received**: `OnSubscribeFailureFn` should fire if
-   subscribe failed; we wired it but never saw it. Maybe needs more time or
-   a different module name.
-2. **Device not in user's "owned" list**: plugin may fetch the printer list
-   on login and only allow commands to printers in that list. Our test user
-   does own the printer though.
-3. **Wrong ABI version**: BBLNetworkPlugin in OrcaSlicer detects "legacy" vs
-   new ABI and the legacy `send_message` takes 4 args (no `flag`). Our
-   plugin may need 4-arg variant — though calling with 5 args shouldn't
-   crash (extra arg just ignored on stack).
-4. **Need `connect_printer` first**: even for cloud, OrcaSlicer's
-   `BBLPrinterAgent` calls connect_printer before send_message. We tried
-   without that.
-5. **Country code mismatch**: plugin may route to wrong region (CN vs US
-   broker) based on `set_country_code`.
+| Command sub-key  | send_message result | Notes |
+|------------------|---------------------|-------|
+| `system/ledctrl` | ✅ → 0, response received | Plugin signs + Bambu accepts |
+| `print/print_speed` | ❌ → -2 | Plugin refuses client-side |
+| `print/pause`    | ❌ → -2 | Plugin refuses client-side |
+| `print/stop`     | ❌ → -2 | Plugin refuses client-side |
+| `print/ams_filament_setting` | ❌ → -2 | Plugin refuses client-side |
+| `print/gcode_line` | ❌ → -2 | Plugin refuses client-side |
 
-## Next steps to crack -2
+**Conclusion:** Bambu's "Authorization Control System" (rolled out in 2024
+firmware updates) **hardened the network plugin to refuse signing arbitrary
+`print` sub-key commands** via the generic send_message API. The plugin
+embeds the signing cert but only USES it for the dedicated
+`bambu_network_start_print` workflow — runtime control commands are blocked
+client-side regardless of caller.
 
-- Wire `OnSubscribeFailureFn` callback to see if subscribe fails async
-- Try `connect_printer(dev_id, "", "", "", false)` before send (cloud path)
-- Try with country code matching the user's actual region
-- Compare with strace/dtruss output to see what the plugin is doing
-- Try with `send_message_to_printer` (LAN path) to isolate cloud vs LAN
+This matches the OrcaSlicer issue #9303 reports: third-party tools that used
+to work for pause/resume stopped working after firmware updates, even though
+they're using Bambu's official plugin via the same FFI patterns we did.
+
+**For pause/resume/stop/ams/calibrate/etc., BambuBridge (LAN MQTT) remains
+the only viable path.** The local broker accepts commands with `bblp` auth
+without signing — same approach OrcaSlicer falls back to.
+
+**This module is preserved** as a working FFI scaffold in case Bambu ever
+relaxes the policy, or in case we discover a different signing path (e.g.,
+the dedicated `start_print` workflow may still be exploitable for non-print
+operations). For now it is not wired into any production code.
 
 ## Legal
 

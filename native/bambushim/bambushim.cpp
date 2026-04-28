@@ -76,6 +76,11 @@ extern "C" {
     void bambu_network_enable_multi_machine(void* agent, bool enable);
     int  bambu_network_add_subscribe(void* agent, std::vector<std::string> dev_list);
     int  bambu_network_del_subscribe(void* agent, std::vector<std::string> dev_list);
+    int  bambu_network_set_user_selected_machine(void* agent, std::string dev_id);
+    int  bambu_network_refresh_connection(void* agent);
+
+    using OnSubscribeFailureFn = std::function<void(std::string topic)>;
+    int  bambu_network_set_on_subscribe_failure_fn(void* agent, OnSubscribeFailureFn fn);
 }
 
 // ── C-friendly wrapper API exposed to Node.js FFI ────────────────────────────
@@ -283,6 +288,20 @@ int shim_del_subscribe_one(void* agent, const char* dev_id) {
     std::vector<std::string> v;
     if (dev_id) v.push_back(std::string(dev_id));
     return bambu_network_del_subscribe(agent, v);
+}
+
+int shim_set_user_selected_machine(void* agent, const char* dev_id) {
+    return bambu_network_set_user_selected_machine(agent, std::string(dev_id ? dev_id : ""));
+}
+
+typedef void (*c_on_subscribe_failure)(const char* topic);
+static c_on_subscribe_failure g_on_subscribe_failure = nullptr;
+int shim_set_on_subscribe_failure_fn(void* agent, c_on_subscribe_failure cb) {
+    g_on_subscribe_failure = cb;
+    OnSubscribeFailureFn fn = [](std::string topic) {
+        if (g_on_subscribe_failure) g_on_subscribe_failure(topic.c_str());
+    };
+    return bambu_network_set_on_subscribe_failure_fn(agent, fn);
 }
 
 // Country-code callback is sync — plugin calls and expects a string back.
