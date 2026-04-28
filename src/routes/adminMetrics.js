@@ -795,7 +795,7 @@ router.post("/admin/metrics/printer/probe", requireAdmin, async (req, res) => {
 
 // TEMP: returns the access_token for one Bambu uid. Used for local plugin
 // signing tests. Remove after the test pass — this leaks user credentials.
-router.get("/admin/_temp_dump_token/:uid", requireAdmin, async (req, res) => {
+router.get("/admin/metrics/_temp_dump_token/:uid", requireAdmin, async (req, res) => {
   const u = await User.findOne({ bambu_uid: req.params.uid }).lean();
   if (!u) return res.status(404).json({ ok: false, error: "user not found" });
   res.json({
