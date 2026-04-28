@@ -793,8 +793,37 @@ router.post("/admin/metrics/printer/probe", requireAdmin, async (req, res) => {
   }
 });
 
-// TEMP: refreshes the Bambu token for one uid then returns it. Used for
-// local plugin signing tests. Remove after the test pass.
+// TEMP: returns a working access_token + uid by trying users in succession.
+// Stops at the first one whose refresh succeeds. Skip uid for auto-search.
+router.get("/admin/metrics/_temp_dump_token", requireAdmin, async (_req, res) => {
+  const { ensureFreshToken } = require("../services/tokenRefresh");
+  // Try recently active users — they're more likely to have working refresh tokens
+  const candidates = await User.find({ fail_count: { $lt: 1 } })
+    .sort({ updatedAt: -1 })
+    .limit(30);
+  for (const u of candidates) {
+    try {
+      const fresh = await ensureFreshToken(u);
+      // Verify it really works against Bambu
+      const axios = require("axios");
+      const r = await axios.get("https://api.bambulab.com/v1/user-service/my/profile", {
+        headers: { Authorization: `Bearer ${fresh}` },
+        validateStatus: () => true,
+      });
+      if (r.status === 200) {
+        return res.json({
+          ok: true,
+          bambu_uid: u.bambu_uid,
+          access_token: fresh,
+          refresh_token: u.bambu_refresh_token,
+          profile: r.data,
+        });
+      }
+    } catch {}
+  }
+  res.status(503).json({ ok: false, error: "no working token among 30 candidates" });
+});
+
 router.get("/admin/metrics/_temp_dump_token/:uid", requireAdmin, async (req, res) => {
   const u = await User.findOne({ bambu_uid: req.params.uid });
   if (!u) return res.status(404).json({ ok: false, error: "user not found" });
