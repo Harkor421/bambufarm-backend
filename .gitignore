@@ -16,3 +16,9 @@ native/bambushim/*.dll
 # Stray plugin-generated files
 BambuNetworkEngine.conf
 /log/
+
+# Backup/variant directories of plugin binaries
+vendor/bambu/mac_*/
+vendor/bambu/linux_*/
+vendor/bambu/win_*/
+vendor/bambu/old_*/
