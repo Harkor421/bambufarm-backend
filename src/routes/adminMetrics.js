@@ -811,9 +811,10 @@ router.post("/admin/metrics/printer/probe", requireAdmin, async (req, res) => {
  *                   reply (default 4000)
  * ───────────────────────────────────────────────────────────────────────── */
 router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req, res) => {
-  let agent = null;
+  // Run the plugin in a child process so any crash/hang doesn't take down
+  // the main server.
   try {
-    const { command = "light_off", stayConnectedFor = 4000 } = req.body || {};
+    const { command = "light_off" } = req.body || {};
     let { bambuUid, printerId } = req.body || {};
 
     // 1. Find a user with a working refresh token + at least one owned printer
@@ -847,13 +848,53 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
       bambuUid = targetUser.bambu_uid;
     }
 
-    // 2. Load the plugin via our shim
-    let BambuAgent;
-    try {
-      ({ BambuAgent } = require("../services/bambuPluginAgent"));
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: `plugin shim not loadable: ${err.message}` });
+    // 2. Find a printer if not given
+    if (!printerId) {
+      const PrinterState = require("../db/models/PrinterState");
+      const ps = await PrinterState.findOne({ user_id: targetUser._id }).lean();
+      if (!ps) return res.json({ ok: false, error: "user has no printers in DB" });
+      printerId = ps.printer_id;
     }
+
+    // 3. Spawn child process with the probe — isolated so a plugin crash
+    //    doesn't tank the main server
+    const path = require("path");
+    const { execFile } = require("child_process");
+    const probeScript = path.join(__dirname, "..", "..", "scripts", "bambu-plugin-probe.js");
+    const probeArg = JSON.stringify({
+      accessToken: token,
+      refreshToken: targetUser.bambu_refresh_token,
+      uid: bambuUid,
+      account: profile.account || "",
+      name: profile.name || "",
+      printerId,
+      command,
+    });
+
+    const child = execFile("node", [probeScript, probeArg], {
+      timeout: 30000,
+      maxBuffer: 4 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      const out = (() => { try { return JSON.parse(stdout || "{}"); } catch { return { ok: false, parse_fail: true, stdout: stdout?.slice(0,2000) }; } })();
+      res.json({
+        ok: out.ok ?? false,
+        bambu_uid: bambuUid,
+        printerId,
+        command,
+        send_message_returned: out.send_message_returned,
+        meaning: out.send_message_returned === 0 ? "✅ plugin SIGNED + published"
+               : out.send_message_returned === -2 ? "❌ -2 (no app_cert / signing failed)"
+               : `code ${out.send_message_returned}`,
+        diagnostics: out.diagnostics || [],
+        child_error: err ? err.message : null,
+        child_stderr: (stderr || "").slice(-2000),
+        child_exit: err?.code ?? 0,
+      });
+    });
+    return;
+    // (rest of old in-process code below is unreachable now — kept for ref)
+    // eslint-disable-next-line no-unreachable
+    let BambuAgent;
 
     const responses = [];
     agent = new BambuAgent();
