@@ -157,12 +157,18 @@ int shim_send_message_v5(void* agent, const char* dev_id, const char* json_str,
 }
 
 // Legacy 4-arg variant — what OrcaSlicer's BBLPrinterAgent calls by default
-// (m_use_legacy_network defaults to true). The plugin we have at version
-// 02.06.00.50 IS the legacy ABI — calling with 5 args makes the plugin treat
-// the extra arg as garbage and reject the request.
+// (m_use_legacy_network defaults to true). Aliased to the same symbol
+// `bambu_network_send_message` via __asm__ — name has a leading underscore
+// in object files on Mac, no prefix on Linux/ELF.
+#if defined(__APPLE__)
 extern "C" int bambu_network_send_message_legacy(void* agent, std::string dev_id,
                                                  std::string json_str, int qos)
     __asm__("_bambu_network_send_message");
+#else
+extern "C" int bambu_network_send_message_legacy(void* agent, std::string dev_id,
+                                                 std::string json_str, int qos)
+    __asm__("bambu_network_send_message");
+#endif
 int shim_send_message(void* agent, const char* dev_id, const char* json_str, int qos) {
     return bambu_network_send_message_legacy(agent,
         std::string(dev_id ? dev_id : ""),

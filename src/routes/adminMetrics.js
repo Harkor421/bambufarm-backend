@@ -793,4 +793,168 @@ router.post("/admin/metrics/printer/probe", requireAdmin, async (req, res) => {
   }
 });
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * POST /api/admin/metrics/printer/probe-via-plugin
+ *
+ * THE BIG TEST. Loads Bambu's signed network plugin via our FFI shim and
+ * tries to send a real signed cloud command. On Mac the plugin always
+ * returns -2 because it verifies the caller's code signature against
+ * Bambu Lab's Apple Developer team. On Linux (Railway) there's no such
+ * check — the plugin should sign messages cleanly.
+ *
+ * Body (all optional):
+ *   bambuUid?     — pick a specific user (otherwise auto-search a working one)
+ *   printerId?    — target printer (otherwise picks first owned one)
+ *   command?      — one of: light_off, print_speed, pause, ams_filament
+ *                   default: light_off (safest, doesn't disrupt anything)
+ *   stayConnectedFor? — how many ms to keep the agent alive waiting for printer
+ *                   reply (default 4000)
+ * ───────────────────────────────────────────────────────────────────────── */
+router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req, res) => {
+  let agent = null;
+  try {
+    const { command = "light_off", stayConnectedFor = 4000 } = req.body || {};
+    let { bambuUid, printerId } = req.body || {};
+
+    // 1. Find a user with a working refresh token + at least one owned printer
+    const { ensureFreshToken } = require("../services/tokenRefresh");
+    const axios = require("axios");
+    let targetUser = null;
+    let token = null;
+    let profile = null;
+
+    if (bambuUid) {
+      const u = await User.findOne({ bambu_uid: bambuUid });
+      if (!u) return res.status(404).json({ ok: false, error: "user not found" });
+      const fresh = await ensureFreshToken(u);
+      const r = await axios.get("https://api.bambulab.com/v1/user-service/my/profile", {
+        headers: { Authorization: `Bearer ${fresh}` }, validateStatus: () => true,
+      });
+      if (r.status !== 200) return res.status(503).json({ ok: false, error: `profile fetch failed: ${r.status}` });
+      targetUser = u; token = fresh; profile = r.data;
+    } else {
+      const candidates = await User.find({ fail_count: { $lt: 1 } }).sort({ updatedAt: -1 }).limit(20);
+      for (const u of candidates) {
+        try {
+          const fresh = await ensureFreshToken(u);
+          const r = await axios.get("https://api.bambulab.com/v1/user-service/my/profile", {
+            headers: { Authorization: `Bearer ${fresh}` }, validateStatus: () => true,
+          });
+          if (r.status === 200) { targetUser = u; token = fresh; profile = r.data; break; }
+        } catch {}
+      }
+      if (!targetUser) return res.status(503).json({ ok: false, error: "no working token" });
+      bambuUid = targetUser.bambu_uid;
+    }
+
+    // 2. Load the plugin via our shim
+    let BambuAgent;
+    try {
+      ({ BambuAgent } = require("../services/bambuPluginAgent"));
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: `plugin shim not loadable: ${err.message}` });
+    }
+
+    const responses = [];
+    agent = new BambuAgent();
+    agent.events.onMessage = (devId, msg) => {
+      try {
+        const j = JSON.parse(msg);
+        const subKey = Object.keys(j).find((k) => j[k]?.sequence_id === "9999");
+        if (subKey) responses.push({ devId, body: j });
+      } catch {}
+    };
+
+    agent.create("/tmp/bambu-agent-log");
+    agent.registerCallbacks();
+    agent.setCountryCodeCallback("US");
+    agent.initLog();
+    agent.setConfigDir("/tmp/bambu-agent-config");
+    // System CA bundle on Debian (Railway nixpacks)
+    const fs = require("fs");
+    const certCandidates = ["/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem", "/etc/pki/tls/certs/ca-bundle.crt"];
+    const certPath = certCandidates.find((p) => fs.existsSync(p)) || "/etc/ssl/certs";
+    const certDir = certPath.substring(0, certPath.lastIndexOf("/"));
+    const certFile = certPath.substring(certPath.lastIndexOf("/") + 1);
+    agent.setCertFile(certDir, certFile);
+    agent.setExtraHttpHeaders({
+      "X-BBL-Client-Type": "slicer",
+      "X-BBL-Client-Name": "BambuStudio",
+      "X-BBL-Client-Version": "02.06.00.51",
+      "X-BBL-OS-Type": "linux",
+      "X-BBL-OS-Version": "5.x",
+    });
+    agent.setCountryCode("US");
+    agent.enableMultiMachine(true);
+    agent.start();
+    agent.changeUser({
+      accessToken: token,
+      refreshToken: targetUser.bambu_refresh_token,
+      uid: bambuUid,
+      account: profile.account || "",
+      name: profile.name || "",
+    });
+    agent.connectServer();
+
+    // Wait for connection
+    await new Promise((r) => setTimeout(r, 2500));
+
+    agent.startSubscribe("app");
+    const userPrintInfo = agent.getUserPrintInfo();
+    const userInfoJson = (() => {
+      try { return JSON.parse(userPrintInfo.body); } catch { return {}; }
+    })();
+    const ownedPrinters = userInfoJson.devices || [];
+    if (!printerId) {
+      const dev = ownedPrinters[0];
+      if (!dev) return res.json({ ok: false, step: "get_user_print_info", body: userPrintInfo });
+      printerId = dev.dev_id;
+    }
+    agent.addSubscribe(printerId);
+    agent.setUserSelectedMachine(printerId);
+
+    // Build command
+    let cmd;
+    if (command === "light_off") {
+      cmd = { system: { sequence_id: "9999", command: "ledctrl", led_node: "chamber_light",
+              led_mode: "off", led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
+    } else if (command === "light_on") {
+      cmd = { system: { sequence_id: "9999", command: "ledctrl", led_node: "chamber_light",
+              led_mode: "on", led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
+    } else if (command === "print_speed") {
+      cmd = { print: { sequence_id: "9999", command: "print_speed", param: "2" } };
+    } else if (command === "pause") {
+      cmd = { print: { sequence_id: "9999", command: "pause", param: "" } };
+    } else if (command === "ams_filament") {
+      cmd = { print: { sequence_id: "9999", command: "ams_filament_setting",
+              ams_id: 0, tray_id: 0, tray_color: "FF00FFFF", tray_type: "PLA",
+              tray_info_idx: "GFL00", nozzle_temp_min: 190, nozzle_temp_max: 230 } };
+    } else {
+      return res.status(400).json({ ok: false, error: `unknown command: ${command}` });
+    }
+
+    const sendResult = agent.sendCloudMessage(printerId, cmd, { qos: 1 });
+
+    // Wait for printer's response
+    await new Promise((r) => setTimeout(r, stayConnectedFor));
+
+    res.json({
+      ok: true,
+      bambu_uid: bambuUid,
+      printerId,
+      command,
+      send_message_returned: sendResult,
+      meaning: sendResult === 0 ? "✅ plugin SIGNED + published"
+             : sendResult === -2 ? "❌ plugin REFUSED to publish (-2 = no app_cert / signing failed)"
+             : `unknown code ${sendResult}`,
+      printer_responses: responses,
+    });
+  } catch (err) {
+    log.error(`[ADMIN] probe-via-plugin error: ${err.message}\n${err.stack}`);
+    res.status(500).json({ ok: false, error: err.message, stack: err.stack });
+  } finally {
+    try { agent && agent.destroy(); } catch {}
+  }
+});
+
 module.exports = router;

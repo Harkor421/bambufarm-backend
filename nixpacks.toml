@@ -1,0 +1,29 @@
+# Railway build config — adds g++/unzip/curl + downloads Bambu plugin and
+# compiles our shim against it. Without this, the Bambu plugin FFI test
+# endpoints would fail because the .so files aren't in git.
+
+providers = ["node"]
+
+[phases.setup]
+nixPkgs = ["nodejs_22", "gcc", "unzip", "curl", "stdenv"]
+
+[phases.bambu_plugin]
+dependsOn = ["setup"]
+cmds = [
+  "echo '[bambu] Downloading Bambu network plugin (Linux x86_64)'",
+  "mkdir -p vendor/bambu/linux",
+  "curl -L -sS -o /tmp/bambu_linux.zip https://public-cdn.bblmw.com/upgrade/studio/plugins/02.06.00.50/7459f94f40/linux_02.06.00.50.zip",
+  "unzip -q -o /tmp/bambu_linux.zip -d vendor/bambu/linux/",
+  "ls -lh vendor/bambu/linux/",
+  "echo '[bambu] Compiling shim against plugin'",
+  "g++ -std=c++17 -shared -fPIC -O2 -o native/bambushim/libbambushim.so native/bambushim/bambushim.cpp -L vendor/bambu/linux -lbambu_networking -Wl,-rpath,'$ORIGIN/../../vendor/bambu/linux'",
+  "ls -lh native/bambushim/libbambushim.so",
+  "echo '[bambu] Build complete'",
+]
+
+[phases.install]
+dependsOn = ["bambu_plugin"]
+cmds = ["npm ci --omit=dev"]
+
+[start]
+cmd = "node src/index.js"
