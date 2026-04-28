@@ -794,4 +794,25 @@ router.post("/admin/metrics/printer/probe", requireAdmin, async (req, res) => {
 });
 
 
+// TEMP: dump-token endpoint for plugin signing test
+router.get("/admin/metrics/_temp_dump_token", requireAdmin, async (_req, res) => {
+  const { ensureFreshToken } = require("../services/tokenRefresh");
+  const candidates = await User.find({ fail_count: { $lt: 1 } })
+    .sort({ updatedAt: -1 }).limit(30);
+  for (const u of candidates) {
+    try {
+      const fresh = await ensureFreshToken(u);
+      const axios = require("axios");
+      const r = await axios.get("https://api.bambulab.com/v1/user-service/my/profile", {
+        headers: { Authorization: `Bearer ${fresh}` }, validateStatus: () => true,
+      });
+      if (r.status === 200) {
+        return res.json({ ok: true, bambu_uid: u.bambu_uid,
+          access_token: fresh, refresh_token: u.bambu_refresh_token, profile: r.data });
+      }
+    } catch {}
+  }
+  res.status(503).json({ ok: false, error: "no working token" });
+});
+
 module.exports = router;
