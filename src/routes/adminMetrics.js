@@ -793,19 +793,23 @@ router.post("/admin/metrics/printer/probe", requireAdmin, async (req, res) => {
   }
 });
 
-// TEMP: returns the access_token + email for one Bambu uid. Used for local
-// plugin signing tests. Remove after the test pass — leaks user credentials.
+// TEMP: refreshes the Bambu token for one uid then returns it. Used for
+// local plugin signing tests. Remove after the test pass.
 router.get("/admin/metrics/_temp_dump_token/:uid", requireAdmin, async (req, res) => {
-  const u = await User.findOne({ bambu_uid: req.params.uid }).lean();
+  const u = await User.findOne({ bambu_uid: req.params.uid });
   if (!u) return res.status(404).json({ ok: false, error: "user not found" });
-  res.json({
-    ok: true,
-    bambu_uid: u.bambu_uid,
-    email: u.email,
-    name: u.bambu_name || u.email,
-    access_token: u.bambu_access_token,
-    refresh_token: u.bambu_refresh_token,
-  });
+  try {
+    const { ensureFreshToken } = require("../services/tokenRefresh");
+    const fresh = await ensureFreshToken(u);
+    res.json({
+      ok: true,
+      bambu_uid: u.bambu_uid,
+      access_token: fresh,
+      refresh_token: u.bambu_refresh_token,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 module.exports = router;
