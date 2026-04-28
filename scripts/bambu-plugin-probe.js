@@ -36,9 +36,9 @@ const log = (k, v) => { result.diagnostics.push({ [k]: v }); process.stderr.writ
     };
 
     log("create_agent", agent.create("/tmp/bambu-agent-log") || "ok");
-    // NOTE: callbacks disabled — may be the crash culprit (cross-language fn ptrs)
-    // agent.registerCallbacks();
-    log("skipped_callbacks", "disabled to test if they were crashing");
+    // callbacks must be registered or plugin segfaults invoking null function
+    agent.registerCallbacks();
+    log("registered_callbacks", "ok");
     log("set_country_code_callback", agent.setCountryCodeCallback("US"));
     log("init_log", agent.initLog());
     log("set_config_dir", agent.setConfigDir("/tmp/bambu-agent-config"));
