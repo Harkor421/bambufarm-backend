@@ -47,13 +47,11 @@ const log = (k, v) => { result.diagnostics.push({ [k]: v }); process.stderr.writ
     log("cert_path_used", certPath);
     agent.setCertFile(path.dirname(certPath), path.basename(certPath));
 
-    log("set_extra_http_headers", agent.setExtraHttpHeaders({
-      "X-BBL-Client-Type": "slicer",
-      "X-BBL-Client-Name": "BambuStudio",
-      "X-BBL-Client-Version": "02.06.00.51",
-      "X-BBL-OS-Type": "linux",
-      "X-BBL-OS-Version": "5.x",
-    }));
+    // Skip set_extra_http_headers — koffi GCs the C strings after call,
+    // plugin stores them as dangling pointers, segfault on next call.
+    // Plugin works without these headers (Bambu only validates against
+    // strict aes256 payload anyway, headers don't help).
+    log("skipped_set_extra_http_headers", "to avoid koffi string lifetime bug");
 
     log("set_country_code", agent.setCountryCode("US"));
     log("enable_multi_machine", agent.enableMultiMachine(true));
