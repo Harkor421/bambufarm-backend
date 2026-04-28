@@ -247,7 +247,12 @@ class BambuAgent {
    * @param {string} [creds.avatar]                  avatar URL
    */
   changeUser(creds) {
+    // Format reverse-engineered from jarczak's BridgeAuthPayload.hpp
+    // normalize_change_user_payload(): the plugin REQUIRES `command: "user_login"`
+    // at the top level. Without this, the plugin treats the auth state as
+    // unauthenticated and the cert/sign flow silently fails (-2 on send_message).
     const payload = {
+      command: "user_login",
       data: {
         token: creds.accessToken,
         refresh_token: creds.refreshToken,
