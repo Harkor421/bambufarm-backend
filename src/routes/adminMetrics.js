@@ -801,9 +801,8 @@ router.get("/admin/_temp_dump_token/:uid", requireAdmin, async (req, res) => {
   res.json({
     ok: true,
     bambu_uid: u.bambu_uid,
-    access_token: u.access_token,
-    refresh_token: u.refresh_token,
-    expires_at: u.bambu_token_expires_at || null,
+    access_token: u.bambu_access_token,
+    refresh_token: u.bambu_refresh_token,
   });
 });
 
