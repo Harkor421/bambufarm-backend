@@ -988,7 +988,10 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
     log.error(`[ADMIN] probe-via-plugin error: ${err.message}\n${err.stack}`);
     res.status(500).json({ ok: false, error: err.message, stack: err.stack });
   } finally {
-    try { agent && agent.destroy(); } catch {}
+    // NOTE: do NOT call agent.destroy() — Bambu's plugin crashes the entire
+    // process when the agent is destroyed before going through proper logout.
+    // We accept the per-call leak for this debug/test endpoint. In production
+    // we'd hold a single long-lived agent instance.
   }
 });
 
