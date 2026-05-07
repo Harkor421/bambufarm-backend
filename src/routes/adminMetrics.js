@@ -7,6 +7,71 @@ const log = require("../utils/logger");
 
 const router = Router();
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * Lazy email backfill
+ *
+ * The bambu_email field was added later, so users registered BEFORE that
+ * change have null in their record. Whenever GET /admin/metrics/users
+ * surfaces a user without an email, we kick off a background fetch
+ * against Bambu's /v1/user-service/my/profile using the stored access
+ * token. The next time the admin refetches users, the email is there.
+ *
+ * - Fire-and-forget: never blocks the response.
+ * - Per-user dedup so a single admin reload doesn't queue duplicates.
+ * - Concurrency cap (5 in-flight) so Bambu's API isn't hammered by a
+ *   first-load that has hundreds of empty rows.
+ * ───────────────────────────────────────────────────────────────────── */
+const _emailBackfillInflight = new Set();
+let _emailBackfillSlots = 5;
+const _emailBackfillQueue = [];
+async function _runBackfillOne(user) {
+  const id = String(user._id);
+  if (_emailBackfillInflight.has(id)) return;
+  _emailBackfillInflight.add(id);
+  try {
+    const axios = require("axios");
+    const profile = await axios.get(
+      "https://api.bambulab.com/v1/user-service/my/profile",
+      {
+        headers: { Authorization: `Bearer ${user.bambu_access_token}` },
+        timeout: 5000,
+      }
+    );
+    const update = {};
+    if (profile.data?.email) update.bambu_email = profile.data.email;
+    if (profile.data?.account) update.bambu_account = profile.data.account;
+    const nm = profile.data?.name || profile.data?.nickName;
+    if (nm) update.bambu_name = nm;
+    if (Object.keys(update).length > 0) {
+      await User.updateOne({ _id: user._id }, { $set: update });
+      log.info(`[BACKFILL] user ${id} → ${update.bambu_email || update.bambu_account || nm || '(no email)'}`);
+    }
+  } catch (err) {
+    // Most failures are 401 (expired token) — that user's email will
+    // be filled when they next open the app and re-register.
+    if (err?.response?.status !== 401) {
+      log.warn(`[BACKFILL] user ${id} failed: ${err?.response?.status || err.message}`);
+    }
+  } finally {
+    _emailBackfillInflight.delete(id);
+    _emailBackfillSlots += 1;
+    _emailBackfillTick();
+  }
+}
+function _emailBackfillTick() {
+  while (_emailBackfillSlots > 0 && _emailBackfillQueue.length > 0) {
+    const u = _emailBackfillQueue.shift();
+    _emailBackfillSlots -= 1;
+    _runBackfillOne(u);
+  }
+}
+function scheduleEmailBackfill(user) {
+  if (!user?.bambu_access_token) return;
+  if (_emailBackfillInflight.has(String(user._id))) return;
+  _emailBackfillQueue.push(user);
+  _emailBackfillTick();
+}
+
 /**
  * Recent state-change activity log (in-memory, last N events).
  * Populated by mqttPrinterService via eventBus (see _attachActivityLog below).
@@ -377,9 +442,40 @@ router.get("/admin/metrics/users", requireAdmin, async (req, res) => {
       };
     });
 
+    // Lazy backfill: schedule profile fetches for any visible user
+    // missing an email. Doesn't block the response — the next time
+    // the admin polls /users they'll see the emails populate.
+    for (const g of page) {
+      if (!g.email) scheduleEmailBackfill(g.rep);
+    }
+
     res.json({ ok: true, total: dedupedTotal, limit, offset, items });
   } catch (err) {
     log.error(`[ADMIN] Users error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * POST /api/admin/metrics/users/backfill-emails
+ *
+ * One-shot bulk backfill — iterate ALL users without bambu_email and
+ * fetch their profile. Useful right after deploy to fill in everyone
+ * at once instead of waiting for them to scroll past in /users.
+ * Returns immediately; backfill runs asynchronously in the background.
+ * ───────────────────────────────────────────────────────────────────── */
+router.post("/admin/metrics/users/backfill-emails", requireAdmin, async (_req, res) => {
+  try {
+    const candidates = await User.find({
+      bambu_email: { $in: [null, ""] },
+      bambu_access_token: { $exists: true, $ne: "" },
+    })
+      .select("_id bambu_access_token")
+      .lean();
+    for (const u of candidates) scheduleEmailBackfill(u);
+    res.json({ ok: true, queued: candidates.length });
+  } catch (err) {
+    log.error(`[ADMIN] Backfill error: ${err.message}`);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
