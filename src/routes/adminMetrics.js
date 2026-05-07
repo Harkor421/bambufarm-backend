@@ -73,6 +73,28 @@ function scheduleEmailBackfill(user) {
 }
 
 /**
+ * Called once on server boot to enqueue every user that's missing
+ * an email. Runs through the same throttled queue as the lazy +
+ * bulk paths so Bambu's API stays happy. Safe to invoke multiple
+ * times — per-user dedup prevents repeats.
+ */
+async function bootBackfillEmails() {
+  try {
+    const candidates = await User.find({
+      bambu_email: { $in: [null, ""] },
+      bambu_access_token: { $exists: true, $ne: "" },
+    })
+      .select("_id bambu_access_token")
+      .lean();
+    if (candidates.length === 0) return;
+    log.info(`[BACKFILL] Boot scan: ${candidates.length} user(s) missing email — enqueueing`);
+    for (const u of candidates) scheduleEmailBackfill(u);
+  } catch (err) {
+    log.warn(`[BACKFILL] Boot scan failed: ${err.message}`);
+  }
+}
+
+/**
  * Recent state-change activity log (in-memory, last N events).
  * Populated by mqttPrinterService via eventBus (see _attachActivityLog below).
  */
@@ -1216,3 +1238,4 @@ router.post("/admin/metrics/printer/probe-via-plugin", requireAdmin, async (req,
 });
 
 module.exports = router;
+module.exports.bootBackfillEmails = bootBackfillEmails;

@@ -35,6 +35,16 @@ async function main() {
   // Log APNs configuration status
   apns.logConfig();
 
+  // Backfill any users still missing bambu_email — runs through the
+  // throttled queue in adminMetrics so Bambu's API isn't hammered.
+  // Fire-and-forget so it doesn't delay boot.
+  try {
+    const { bootBackfillEmails } = require("./routes/adminMetrics");
+    if (typeof bootBackfillEmails === "function") {
+      bootBackfillEmails().catch(() => {});
+    }
+  } catch {}
+
   // Lightweight poller — token refresh + printer discovery only (MQTT handles everything else)
   const interval = Number(process.env.POLL_INTERVAL_MS) || 1800000; // 30 min
   startPolling(interval);
