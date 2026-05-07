@@ -246,18 +246,60 @@ router.get("/admin/metrics/users", requireAdmin, async (req, res) => {
     const query = {};
     if (hasBridge) query.bambu_uid = { $in: [...bridgeUids] };
 
-    const total = await User.countDocuments(query);
-    const users = await User.find(query)
+    // Pull every user matching the filter — we'll dedupe by bambu_uid
+    // and paginate AFTER the dedup. We can't dedupe at the DB level
+    // because we want to keep the freshest fields (email, tokens) from
+    // whichever device was most recently active for that uid.
+    const allUsers = await User.find(query)
       .sort({ updatedAt: -1 })
-      .skip(offset)
-      .limit(limit)
-      .select("_id bambu_uid expo_push_token bambu_token_expires_at fail_count la_push_to_start_token createdAt updatedAt")
+      .select(
+        "_id bambu_uid bambu_email bambu_account bambu_name expo_push_token bambu_token_expires_at fail_count la_push_to_start_token createdAt updatedAt"
+      )
       .lean();
 
-    // Bridge counts per user (for the visible page)
-    const bambuUids = users.map((u) => u.bambu_uid).filter(Boolean);
+    // Dedup by bambu_uid: each human gets ONE row even if they
+    // registered the app on multiple devices (each device = its own
+    // User doc). Users without a bambu_uid (failed Bambu auth) keep
+    // their own row keyed by _id so we don't collapse them all.
+    const groups = new Map();
+    for (const u of allUsers) {
+      const key = u.bambu_uid || `__nouid__${u._id}`;
+      const g = groups.get(key);
+      if (!g) {
+        groups.set(key, {
+          rep: u,                     // most recently updated wins
+          deviceCount: 1,
+          firstSeen: u.createdAt,
+          userIds: [u._id],
+          // Fall back across devices for fields the rep might be
+          // missing (older devices registered before bambu_email
+          // existed, etc.).
+          email: u.bambu_email || null,
+          account: u.bambu_account || null,
+          name: u.bambu_name || null,
+        });
+      } else {
+        g.deviceCount += 1;
+        g.userIds.push(u._id);
+        if (u.createdAt && (!g.firstSeen || u.createdAt < g.firstSeen)) g.firstSeen = u.createdAt;
+        if (!g.email && u.bambu_email) g.email = u.bambu_email;
+        if (!g.account && u.bambu_account) g.account = u.bambu_account;
+        if (!g.name && u.bambu_name) g.name = u.bambu_name;
+      }
+    }
+
+    const dedupedTotal = groups.size;
+    const dedupedSorted = [...groups.values()].sort(
+      (a, b) => new Date(b.rep.updatedAt) - new Date(a.rep.updatedAt)
+    );
+    const page = dedupedSorted.slice(offset, offset + limit);
+
+    // Pull bridge + printer aggregates ONLY for the visible page.
+    const pageUids = page.map((g) => g.rep.bambu_uid).filter(Boolean);
+    const pageUserIds = page.flatMap((g) => g.userIds);
+
     const bridgeAgg = await BridgeSession.aggregate([
-      { $match: { bambu_uid: { $in: bambuUids } } },
+      { $match: { bambu_uid: { $in: pageUids } } },
       { $group: {
         _id: "$bambu_uid",
         sessionCount: { $sum: 1 },
@@ -267,18 +309,31 @@ router.get("/admin/metrics/users", requireAdmin, async (req, res) => {
     ]);
     const bridgeMap = Object.fromEntries(bridgeAgg.map((b) => [b._id, b]));
 
-    // Printer counts per user (for the visible page)
-    const userIds = users.map((u) => u._id);
+    // Printer aggregate: same printer_dev_id can exist under multiple
+    // user_ids when the human used multiple devices. Dedupe by
+    // (uid, dev_id) pair via a $lookup so the count reflects DISTINCT
+    // physical printers, not row count.
     const printerAgg = await PrinterState.aggregate([
-      { $match: { user_id: { $in: userIds } } },
+      { $match: { user_id: { $in: pageUserIds } } },
+      { $lookup: {
+        from: "users",
+        localField: "user_id",
+        foreignField: "_id",
+        as: "user",
+      }},
+      { $unwind: "$user" },
       { $group: {
-        _id: "$user_id",
+        _id: { uid: "$user.bambu_uid", dev: "$printer_dev_id" },
+        notif_status: { $first: "$notif_status" },
+      }},
+      { $group: {
+        _id: "$_id.uid",
         printerCount: { $sum: 1 },
         printingCount: { $sum: { $cond: [{ $eq: ["$notif_status", "printing"] }, 1, 0] } },
         pausedCount: { $sum: { $cond: [{ $eq: ["$notif_status", "paused"] }, 1, 0] } },
       }},
     ]);
-    const printerMap = Object.fromEntries(printerAgg.map((p) => [String(p._id), p]));
+    const printerMap = Object.fromEntries(printerAgg.map((p) => [p._id, p]));
 
     // Live: which bambuUids currently have a bridge WS open?
     const wsManager = require("../services/wsManager");
@@ -289,17 +344,25 @@ router.get("/admin/metrics/users", requireAdmin, async (req, res) => {
       }
     }
 
-    const items = users.map((u) => {
+    const items = page.map((g) => {
+      const u = g.rep;
       const bridge = bridgeMap[u.bambu_uid] || null;
-      const printer = printerMap[String(u._id)] || null;
+      const printer = printerMap[u.bambu_uid] || null;
       return {
         userId: String(u._id),
         bambuUid: u.bambu_uid,
+        // Email surfaced for the admin metrics page. account is the
+        // Bambu login (typically also an email), name is the display
+        // name. Frontend can pick whichever is set.
+        email: g.email,
+        account: g.account,
+        name: g.name,
+        deviceCount: g.deviceCount,
         pushTokenTail: u.expo_push_token ? u.expo_push_token.slice(-12) : null,
         tokenExpiresAt: u.bambu_token_expires_at,
         failCount: u.fail_count,
         hasLiveActivities: !!u.la_push_to_start_token,
-        registeredAt: u.createdAt,
+        registeredAt: g.firstSeen,
         lastSeenAt: u.updatedAt,
         bridge: bridge ? {
           sessionCount: bridge.sessionCount,
@@ -314,7 +377,7 @@ router.get("/admin/metrics/users", requireAdmin, async (req, res) => {
       };
     });
 
-    res.json({ ok: true, total, limit, offset, items });
+    res.json({ ok: true, total: dedupedTotal, limit, offset, items });
   } catch (err) {
     log.error(`[ADMIN] Users error: ${err.message}`);
     res.status(500).json({ ok: false, error: err.message });

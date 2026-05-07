@@ -52,21 +52,31 @@ router.post("/register", async (req, res) => {
     //    (token rotated, but the device hasn't changed).
     // 3. Otherwise, call Bambu's profile API — a forged token will fail this.
     let bambuUid = null;
+    let bambuProfile = null; // { email, account, name } captured from /my/profile
     try {
       const existing = await User.findOne({ expo_push_token: expoPushToken })
-        .select("bambu_uid")
+        .select("bambu_uid bambu_email")
         .lean();
       if (existing?.bambu_uid) bambuUid = String(existing.bambu_uid);
+      // Force a fresh profile fetch if we don't have an email cached
+      // yet — older users registered before bambu_email was added to
+      // the schema, so we backfill on their next register.
+      var needsProfileFetch = !existing?.bambu_email;
     } catch {}
 
-    if (!bambuUid) {
+    if (!bambuUid || needsProfileFetch) {
       try {
         const axios = require("axios");
         const profile = await axios.get("https://api.bambulab.com/v1/user-service/my/profile", {
           headers: { Authorization: `Bearer ${accessToken}` },
           timeout: 5000,
         });
-        bambuUid = String(profile.data.uid);
+        if (!bambuUid) bambuUid = String(profile.data.uid);
+        bambuProfile = {
+          email: profile.data.email || null,
+          account: profile.data.account || null,
+          name: profile.data.name || profile.data.nickName || null,
+        };
       } catch (err) {
         // Bambu rejected the token — could be expired, malformed, or forged.
         // Don't store an unverified bambu_uid; the user's record will be created
@@ -82,6 +92,9 @@ router.post("/register", async (req, res) => {
       fail_count: 0,
     };
     if (bambuUid) update.bambu_uid = bambuUid;
+    if (bambuProfile?.email) update.bambu_email = bambuProfile.email;
+    if (bambuProfile?.account) update.bambu_account = bambuProfile.account;
+    if (bambuProfile?.name) update.bambu_name = bambuProfile.name;
 
     if (laPushToStartToken) {
       if (!isValidHexToken(laPushToStartToken)) {
