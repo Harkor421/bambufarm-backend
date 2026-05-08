@@ -15,10 +15,10 @@
     "postinstall": "bash scripts/build-bambushim.sh || true"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.82.0",
-    "@aws-sdk/client-s3": "^3.1033.0",
-    "@sentry/node": "^10.49.0",
-    "axios": "^1.7.0",
+    "@anthropic-ai/sdk": "^0.95.1",
+    "@aws-sdk/client-s3": "^3.1045.0",
+    "@sentry/node": "^10.52.0",
+    "axios": "^1.16.0",
     "compression": "^1.8.1",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
@@ -26,10 +26,10 @@
     "form-data": "^4.0.5",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.3",
-    "koffi": "^2.16.1",
-    "mongoose": "^8.5.0",
-    "mqtt": "^5.15.0",
-    "ws": "^8.19.0"
+    "koffi": "^2.16.2",
+    "mongoose": "^8.23.1",
+    "mqtt": "^5.15.1",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "eslint": "^8.57.1",
