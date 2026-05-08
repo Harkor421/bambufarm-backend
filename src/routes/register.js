@@ -53,15 +53,16 @@ router.post("/register", async (req, res) => {
     // 3. Otherwise, call Bambu's profile API — a forged token will fail this.
     let bambuUid = null;
     let bambuProfile = null; // { email, account, name } captured from /my/profile
+    // Declared OUT of the try below because we need it visible to the
+    // `if (!bambuUid || needsProfileFetch)` guard. Older users without
+    // a stored email get a profile-API backfill on next register.
+    let needsProfileFetch = false;
     try {
       const existing = await User.findOne({ expo_push_token: expoPushToken })
         .select("bambu_uid bambu_email")
         .lean();
       if (existing?.bambu_uid) bambuUid = String(existing.bambu_uid);
-      // Force a fresh profile fetch if we don't have an email cached
-      // yet — older users registered before bambu_email was added to
-      // the schema, so we backfill on their next register.
-      var needsProfileFetch = !existing?.bambu_email;
+      needsProfileFetch = !existing?.bambu_email;
     } catch {}
 
     if (!bambuUid || needsProfileFetch) {
