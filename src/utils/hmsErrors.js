@@ -4507,4 +4507,4 @@ function formatHmsCode(attr, code) {
   return `${ecode.slice(0,4)}-${ecode.slice(4,8)}-${ecode.slice(8,12)}-${ecode.slice(12,16)}`;
 }
 
-module.exports = { lookupHmsError, lookupDeviceError, formatHmsCode, getHmsSeverity, buildHmsEcode };
+module.exports = { lookupHmsError, formatHmsCode };

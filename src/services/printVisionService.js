@@ -9,7 +9,6 @@
  */
 
 const Anthropic = require("@anthropic-ai/sdk").default;
-const axios = require("axios");
 const log = require("../utils/logger");
 const config = require("../config");
 const { sendPush } = require("./pushSender");
@@ -268,7 +267,6 @@ class PrintVisionService {
   async _notifyUser(bambuUid, devId, result, mqttState) {
     try {
       const users = await User.find({ bambu_uid: bambuUid, expo_push_token: { $exists: true, $ne: null } }).lean();
-      const printerName = mqttState.subtask_name ? `${devId}` : devId;
       const issueList = result.issues?.join(", ") || "print issue";
 
       const sentTokens = new Set();
@@ -293,7 +291,7 @@ class PrintVisionService {
     }
   }
 
-  async _broadcastWithImage(bambuUid, devId, result, mqttState) {
+  async _broadcastWithImage(bambuUid, devId, result, _mqttState) {
     const { broadcastWithImage } = require("./tecnoprintsBroadcast");
     const frame = require("./wsManager").getLatestFrame(bambuUid, devId);
     const issueList = result.issues?.join(", ") || "print issue";

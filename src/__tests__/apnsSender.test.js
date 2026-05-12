@@ -28,9 +28,11 @@ describe("apnsSender", () => {
       expect(result).toBeNull();
     });
 
-    it("defaults to priority 5", async () => {
-      // Can't test actual sending without APNS config, but verify function signature
-      expect(apns.sendLiveActivityUpdate.length).toBe(2); // 2 required params
+    it("defaults to priority 10 (APNs throttles priority-5 LA updates)", async () => {
+      // Can't test actual sending without APNS config, but verify function signature.
+      // Two required params (token + content state); priority is the optional 3rd
+      // and defaults to 10 — see project memory "Live Activity Architecture".
+      expect(apns.sendLiveActivityUpdate.length).toBe(2);
     });
   });
 

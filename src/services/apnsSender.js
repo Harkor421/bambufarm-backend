@@ -10,7 +10,6 @@ const APNS_TEAM_ID = config.apns.teamId;
 const APNS_KEY_CONTENTS = config.apns.keyContents;
 const BUNDLE_ID = config.apns.bundleId;
 const APNS_TOPIC = `${BUNDLE_ID}.push-type.liveactivity`;
-const APNS_HOST_PROD = config.apns.host;
 const APNS_HOST_SANDBOX = config.apns.hostSandbox;
 const APNS_HOST = config.apns.host;
 
@@ -186,10 +185,15 @@ async function sendLiveActivityStart(pushToStartToken, attributes, contentState,
 
 /**
  * Update an existing Live Activity.
+ *
+ * Priority MUST be 10 — APNs throttles priority-5 LA updates aggressively
+ * (project memory: "Live Activity Architecture"). Every real call site already
+ * passes 10; the default just protects against accidental priority-5 sends.
+ *
  * @param {string} activityUpdateToken - hex token from activity.pushTokenUpdates
  * @param {object} contentState - { jobTitle, progress, startTime, endTime, status }
  */
-async function sendLiveActivityUpdate(activityUpdateToken, contentState, priority = 5) {
+async function sendLiveActivityUpdate(activityUpdateToken, contentState, priority = 10) {
   if (!isConfigured()) return null;
 
   const payload = {

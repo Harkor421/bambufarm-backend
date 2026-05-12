@@ -65,4 +65,44 @@ function isTecnoprintsAccount(bambuUid) {
   return bambuUid === config.tecnoprints.bambuUid;
 }
 
-module.exports = { broadcastText, broadcastWithImage, isTecnoprintsAccount };
+/**
+ * Build the WhatsApp message string for a printer state transition.
+ * Returns null when the transition isn't worth broadcasting (no prev state,
+ * unrecognized transition, etc). Pure function — no side effects.
+ *
+ * Critically, returns null when `prevGcodeState` is falsy. On backend boot
+ * the very first MQTT push for each printer arrives with prev=undefined; if
+ * any printer is currently in FAILED/PAUSE/etc we'd otherwise blast a fake
+ * "just happened" alert for an event that may be days old.
+ *
+ * @param {string} gcState - Current gcode_state
+ * @param {string} prevGcodeState - Previous gcode_state (undefined on first message)
+ * @param {string} printerName
+ * @param {string} jobName
+ * @param {number} pct - mc_percent (0-100)
+ * @returns {string|null}
+ */
+function buildBroadcastMessage(gcState, prevGcodeState, printerName, jobName, pct) {
+  if (!prevGcodeState) return null;
+
+  if (gcState === "RUNNING" && (prevGcodeState === "IDLE" || prevGcodeState === "FINISH" || prevGcodeState === "FAILED" || prevGcodeState === "PREPARE")) {
+    return `🖨 ${printerName} started printing: ${jobName}`;
+  }
+  if (gcState === "PAUSE" && prevGcodeState === "RUNNING") {
+    return `⏸ ${printerName} paused at ${pct}%: ${jobName}`;
+  }
+  if (gcState === "RUNNING" && prevGcodeState === "PAUSE") {
+    return `▶️ ${printerName} resumed at ${pct}%: ${jobName}`;
+  }
+  if ((gcState === "FINISH" || gcState === "IDLE") && (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE" || prevGcodeState === "PREPARE")) {
+    return pct < 90
+      ? `🚫 ${printerName} cancelled at ${pct}%: ${jobName}`
+      : `✅ ${printerName} finished: ${jobName}`;
+  }
+  if (gcState === "FAILED" && (prevGcodeState === "RUNNING" || prevGcodeState === "PAUSE" || prevGcodeState === "PREPARE")) {
+    return `⚠️ ${printerName} failed at ${pct}%: ${jobName}`;
+  }
+  return null;
+}
+
+module.exports = { broadcastText, broadcastWithImage, isTecnoprintsAccount, buildBroadcastMessage };

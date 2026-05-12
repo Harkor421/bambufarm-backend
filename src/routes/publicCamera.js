@@ -1,6 +1,5 @@
 const express = require("express");
 const wsManager = require("../services/wsManager");
-const log = require("../utils/logger");
 
 const router = express.Router();
 

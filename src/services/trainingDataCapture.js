@@ -136,13 +136,6 @@ function maybeStashPreEndFrame(bambuUid, printerId, state) {
 }
 
 /**
- * Clear the pre-end frame buffer for a printer (called on terminal transitions).
- */
-function clearPreEndFrame(bambuUid, printerId) {
-  preEndFrames.delete(`${bambuUid}:${printerId}`);
-}
-
-/**
  * Capture a camera frame + metadata for the given state transition, if the user
  * has an active BambuBridge (i.e., a cached frame is available).
  *
@@ -253,7 +246,6 @@ module.exports = {
   captureTransition,
   classifyEvent,
   maybeStashPreEndFrame,
-  clearPreEndFrame,
   // Also expose the pre-end frame getter for other services (e.g. WhatsApp)
   getPreEndFrame(bambuUid, printerId) {
     const buffered = preEndFrames.get(`${bambuUid}:${printerId}`);

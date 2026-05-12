@@ -93,14 +93,16 @@ router.post("/printer/speed", (req, res) => {
   if (!level || ![1, 2, 3, 4].includes(Number(level))) {
     return res.status(400).json({ ok: false, error: "Level must be 1-4" });
   }
-  handleCommand(req, res, "speed", () => ({ level: Number(level) }));
+  // handleCommand is async and writes to res itself; rejection is already
+  // caught inside it, but `void` makes the intent explicit for linters.
+  void handleCommand(req, res, "speed", () => ({ level: Number(level) }));
 });
 
 // POST /api/printer/light
 router.post("/printer/light", (req, res) => {
   const { on } = req.body;
   if (on === undefined) return res.status(400).json({ ok: false, error: "Missing on" });
-  handleCommand(req, res, "light", () => ({ on: !!on }));
+  void handleCommand(req, res, "light", () => ({ on: !!on }));
 });
 
 // POST /api/printer/ams-filament — update an AMS slot's color/material/temp
