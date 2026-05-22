@@ -95,10 +95,16 @@ async function verifyCode(email, code) {
 
 /**
  * Refresh access token.
+ *
+ * Endpoint is /refreshtoken (one word); /refresh returns 404. The body field
+ * is camelCase `refreshToken` — snake_case yields 400 "field refreshToken is
+ * not set". Note: Bambu's refresh endpoint may still reject the request
+ * (empty-body 401) — callers should treat refresh as best-effort and not
+ * invalidate a long-lived access token on a refresh failure.
  */
 async function refreshToken(refreshToken) {
-  const resp = await request("POST", "/v1/user-service/user/refresh", {
-    body: { refresh_token: refreshToken },
+  const resp = await request("POST", "/v1/user-service/user/refreshtoken", {
+    body: { refreshToken },
   });
   const tokens = extractTokens(resp);
   if (!tokens) throw new Error("Refresh succeeded but no tokens returned");
