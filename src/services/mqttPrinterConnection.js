@@ -8,6 +8,7 @@
  */
 
 const mqttLib = require("mqtt");
+const axios = require("axios");
 const log = require("../utils/logger");
 
 const config = require("../config");
@@ -15,6 +16,11 @@ const MQTT_HOST = config.bambu.mqttHost;
 const MQTT_PORT = config.bambu.mqttPort;
 const PUSHALL_INTERVAL = config.bambu.pushallInterval;
 const RECONNECT_DELAY = config.bambu.reconnectDelay;
+const BAMBU_API = config.bambu.apiBase;
+// How often a live connection re-fetches the account's bound-device list, so
+// printers that were offline when the connection was first built get picked
+// up without waiting for a server restart.
+const BIND_REFRESH_INTERVAL = 5 * 60 * 1000;
 
 class PrinterMqttConnection {
   constructor({ userId, bambuUid, accessToken, printerIds, onStateChange, onProgressUpdate }) {
@@ -30,6 +36,7 @@ class PrinterMqttConnection {
     this.pushallTimer = null;
     this.pingTimer = null;
     this.reconnectTimer = null;
+    this.bindRefreshTimer = null;
     this.stopped = false;
     this.printerStates = new Map(); // devId → { gcode_state, mc_percent, mc_remaining_time, ... }
     this.sequenceId = 0;
@@ -59,6 +66,12 @@ class PrinterMqttConnection {
         setTimeout(() => this._pushallAll(), 1000);
         // Periodic pushall
         this.pushallTimer = setInterval(() => this._pushallAll(), PUSHALL_INTERVAL);
+        // Periodically re-fetch the bound-device list so a printer that was
+        // offline at connect time gets subscribed without a server restart.
+        this.bindRefreshTimer = setInterval(
+          () => this._refreshPrinterList(),
+          BIND_REFRESH_INTERVAL
+        );
       });
 
       this.client.on("message", (topic, payload) => {
@@ -453,13 +466,65 @@ class PrinterMqttConnection {
     }
   }
 
+  /**
+   * Re-fetch the account's bound-device list and subscribe any printers that
+   * weren't in the original snapshot. Fixes the bug where a printer offline
+   * when the connection was first built stayed invisible — never subscribed,
+   * its reports dropped by _handlePublish — until a full server restart.
+   *
+   * Add-only: newly-bound printers get a subscribe + a pushall to fetch their
+   * current state. Removed printers are left alone (harmless, and avoids
+   * unsubscribe races). Best-effort — a failed fetch just retries next tick.
+   */
+  async _refreshPrinterList() {
+    if (this.stopped || !this.client || !this.connected) return;
+    let devices;
+    try {
+      const resp = await axios.get(`${BAMBU_API}/v1/iot-service/api/user/bind`, {
+        headers: { Authorization: `Bearer ${this.accessToken}` },
+        timeout: 10000,
+      });
+      devices = resp.data?.devices || [];
+    } catch (err) {
+      log.warn(`[MQTT] printer-list refresh failed for user ${this.userId}: ${err.message}`);
+      return;
+    }
+    let added = 0;
+    for (const d of devices) {
+      const devId = d?.dev_id;
+      if (!devId || this.printerIds.has(devId)) continue;
+      this.printerIds.add(devId);
+      this.client.subscribe(`device/${devId}/report`);
+      this.sequenceId++;
+      this.client.publish(
+        `device/${devId}/request`,
+        JSON.stringify({
+          pushing: {
+            sequence_id: String(this.sequenceId),
+            command: "pushall",
+            version: 1,
+            push_target: 1,
+          },
+        })
+      );
+      added++;
+    }
+    if (added > 0) {
+      log.debug(
+        `[MQTT] user ${this.userId}: printer-list refresh subscribed ${added} new printer(s) (now ${this.printerIds.size})`
+      );
+    }
+  }
+
   _stopTimers() {
     if (this.pushallTimer) clearInterval(this.pushallTimer);
     if (this.pingTimer) clearInterval(this.pingTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.bindRefreshTimer) clearInterval(this.bindRefreshTimer);
     this.pushallTimer = null;
     this.pingTimer = null;
     this.reconnectTimer = null;
+    this.bindRefreshTimer = null;
   }
 }
 
