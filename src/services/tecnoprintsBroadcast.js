@@ -9,6 +9,13 @@ const FormData = require("form-data");
 const config = require("../config");
 const log = require("../utils/logger");
 
+// Set DISABLE_WHATSAPP_BROADCAST=true on the server env to silence every
+// outbound WhatsApp message regardless of caller. Default = enabled.
+const WHATSAPP_DISABLED = process.env.DISABLE_WHATSAPP_BROADCAST === "true";
+if (WHATSAPP_DISABLED) {
+  log.warn("[TECNOPRINTS] WhatsApp broadcast DISABLED via DISABLE_WHATSAPP_BROADCAST env var");
+}
+
 let _lastBroadcast = { message: "", at: 0 };
 
 /**
@@ -16,6 +23,7 @@ let _lastBroadcast = { message: "", at: 0 };
  * @param {string} message
  */
 async function broadcastText(message) {
+  if (WHATSAPP_DISABLED) return;
   if (!message) return;
   // Deduplicate
   if (message === _lastBroadcast.message && Date.now() - _lastBroadcast.at < config.tecnoprints.dedupWindow) return;
@@ -38,6 +46,7 @@ async function broadcastText(message) {
  * @param {Buffer|null} frameBuffer - JPEG buffer or null
  */
 async function broadcastWithImage(message, frameBuffer) {
+  if (WHATSAPP_DISABLED) return;
   if (!message) return;
 
   try {
