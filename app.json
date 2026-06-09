@@ -1,5 +1,10 @@
 {
   "ios": {
     "bundleIdentifier": "com.harkor421.bambufarm-server"
+  },
+  "extra": {
+    "eas": {
+      "projectId": "9fac5b17-48d8-4f06-a988-889fcc5ea850"
+    }
   }
 }

@@ -462,7 +462,10 @@ class MqttPrinterService {
 
       // Fire-and-forget: capture a training sample if the transition is interesting
       // and the user has BambuBridge streaming (cached frame available).
-      // This doesn't block the notification pipeline.
+      // This doesn't block the notification pipeline. captureTransition is async,
+      // so we need both a sync try/catch (for require failures) AND a .catch
+      // on the returned promise — bare `captureTransition(...)` would orphan
+      // any async rejection.
       try {
         const { captureTransition } = require("./trainingDataCapture");
         captureTransition({
@@ -473,8 +476,12 @@ class MqttPrinterService {
           effectivePrev,
           state,
           userId,
+        }).catch((err) => {
+          log.debug(`[MQTT] captureTransition failed for ${devId}: ${err.message}`);
         });
-      } catch {}
+      } catch (err) {
+        log.debug(`[MQTT] captureTransition setup failed: ${err.message}`);
+      }
 
       const notification = buildNotification(gcodeState, effectivePrev, state, devId, printerName);
 

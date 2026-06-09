@@ -114,7 +114,10 @@ class PrinterMqttConnection {
     try {
       this.client.publish(topic, JSON.stringify(command));
       return true;
-    } catch {
+    } catch (err) {
+      // Without logging, a broken control endpoint (pause/resume/AMS) returns
+      // `false` silently and the caller has no way to know what went wrong.
+      log.warn(`[MQTT] publish failed for ${devId}: ${err.message}`);
       return false;
     }
   }
@@ -395,7 +398,10 @@ class PrinterMqttConnection {
     try {
       const { maybeStashPreEndFrame } = require("./trainingDataCapture");
       maybeStashPreEndFrame(this.bambuUid, devId, merged);
-    } catch {}
+    } catch (err) {
+      // Non-critical: training capture must not break the MQTT pipeline.
+      log.debug(`[MQTT] maybeStashPreEndFrame failed for ${devId}: ${err.message}`);
+    }
 
     // Push real-time MQTT state to subscribed app clients via WebSocket.
     // Throttled to 1 push per 2 seconds per printer to avoid flooding (Bambu
@@ -412,7 +418,11 @@ class PrinterMqttConnection {
         const { normalizeMqttState } = require("../utils/normalizeMqttState");
         wsManager.broadcastMqttState(this.bambuUid, devId, normalizeMqttState(merged));
       }
-    } catch {}
+    } catch (err) {
+      // Don't let a broadcast failure poison the MQTT state machine — but
+      // do log so a silently-broken WS push path is debuggable.
+      log.debug(`[MQTT] broadcastMqttState failed for ${devId}: ${err.message}`);
+    }
 
     // Send LA progress update at 20% boundaries only (0%, 20%, 40%, 60%, 80%, 100%).
     // Apple's APNs budget for Live Activities is ~4-5 priority-10 updates/hour — a

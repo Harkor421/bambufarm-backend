@@ -3,7 +3,7 @@ require("dotenv").config();
 const http = require("http");
 const app = require("./app");
 const { connectDB, mongoose } = require("./db/database");
-const { startPolling } = require("./services/poller");
+const { startPolling, stopPolling } = require("./services/poller");
 const wsManager = require("./services/wsManager");
 const apns = require("./services/apnsSender");
 const mqttService = require("./services/mqttPrinterService");
@@ -33,13 +33,18 @@ async function main() {
 
   // Backfill any users still missing bambu_email — runs through the
   // throttled queue in adminMetrics so Bambu's API isn't hammered.
-  // Fire-and-forget so it doesn't delay boot.
+  // Fire-and-forget so it doesn't delay boot, but DO log failures so a
+  // silently-broken backfill is visible.
   try {
     const { bootBackfillEmails } = require("./routes/adminMetrics");
     if (typeof bootBackfillEmails === "function") {
-      bootBackfillEmails().catch(() => {});
+      bootBackfillEmails().catch((err) => {
+        log.warn(`[BOOT] bootBackfillEmails failed: ${err.message}`);
+      });
     }
-  } catch {}
+  } catch (err) {
+    log.warn(`[BOOT] could not load bootBackfillEmails: ${err.message}`);
+  }
 
   // Lightweight poller — token refresh + printer discovery only (MQTT handles everything else)
   const interval = Number(process.env.POLL_INTERVAL_MS) || 1800000; // 30 min
@@ -73,6 +78,9 @@ main().catch((err) => {
 // Graceful shutdown
 process.on("SIGINT", async () => {
   log.info("Shutting down...");
+  // Stop the poller FIRST so an in-flight tick doesn't issue a DB query
+  // against the mongoose connection we're about to close below.
+  stopPolling();
   printVisionService.stop();
   mqttService.stop();
   wsManager.close();

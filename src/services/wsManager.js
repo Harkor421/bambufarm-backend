@@ -3,6 +3,7 @@ const log = require("../utils/logger");
 const { verifyBambuToken } = require("./wsTokenAuth");
 const eventBus = require("./eventBus");
 const { EVENTS } = require("./eventBus");
+const config = require("../config");
 
 const MSG_CAMERA_FRAME = 0x01;
 
@@ -50,10 +51,13 @@ class WsManager {
     // Map<bambuUid, Set<printerId>>
     this._adminDemandPrinters = new Map();
 
-    // Listen for state changes to update bridge camera demand
-    eventBus.on(EVENTS.PRINTER_STATE_CHANGE, ({ bambuUid }) => {
+    // Listen for state changes to update bridge camera demand. Stash the
+    // handler so close() can remove it — otherwise restarting the manager
+    // (tests, module hot-reload) accumulates listeners on the shared bus.
+    this._onPrinterStateChange = ({ bambuUid }) => {
       this._notifyBridgeDemand(bambuUid);
-    });
+    };
+    eventBus.on(EVENTS.PRINTER_STATE_CHANGE, this._onPrinterStateChange);
 
     // Sweep expired grace entries every 30s and re-send demand if anything dropped
     this._graceSweepInterval = setInterval(() => this._sweepDemandGrace(), 30000);
@@ -95,7 +99,10 @@ class WsManager {
       }
     });
 
-    // Heartbeat every 30s
+    // Heartbeat. Pings every interval and terminates clients that didn't pong
+    // back since the previous tick. Bumped from 30s → 60s; dead-client
+    // detection takes ~2 intervals (so 60-120s) which is still well within
+    // the demand-grace window.
     this._heartbeatInterval = setInterval(() => {
       if (!this.wss) return;
       for (const ws of this.wss.clients) {
@@ -103,7 +110,7 @@ class WsManager {
         ws._isAlive = false;
         ws.ping();
       }
-    }, 30000);
+    }, config.ws.heartbeatInterval);
 
     log.info("[WS] WebSocket manager attached");
   }
@@ -137,30 +144,39 @@ class WsManager {
           const msg = JSON.parse(data.toString());
           if (msg.type === "bridge_auth" && msg.bambuToken) {
             // Verify token against Bambu Cloud
-            verifyBambuToken(msg.bambuToken).then((uid) => {
-              if (!uid) {
-                ws.close(4003, "Invalid Bambu token");
-                return;
-              }
-              authenticated = true;
-              userId = uid;
-              clearTimeout(authTimeout);
+            verifyBambuToken(msg.bambuToken)
+              .then((uid) => {
+                if (!uid) {
+                  ws.close(4003, "Invalid Bambu token");
+                  return;
+                }
+                authenticated = true;
+                userId = uid;
+                clearTimeout(authTimeout);
 
-              this.bridgeMeta.set(ws, userId);
-              if (!this.bridges.has(userId)) this.bridges.set(userId, new Set());
-              this.bridges.get(userId).add(ws);
+                this.bridgeMeta.set(ws, userId);
+                if (!this.bridges.has(userId)) this.bridges.set(userId, new Set());
+                this.bridges.get(userId).add(ws);
 
-              ws.send(JSON.stringify({ type: "auth_ok", userId }));
-              log.debug(`[WS] Bridge connected for uid ${userId}`);
-              this._sendDemandUpdate(ws, userId);
-              this._notifyBridgeStatus(userId, true);
+                ws.send(JSON.stringify({ type: "auth_ok", userId }));
+                log.debug(`[WS] Bridge connected for uid ${userId}`);
+                this._sendDemandUpdate(ws, userId);
+                this._notifyBridgeStatus(userId, true);
 
-              // Track bridge session in DB
-              const BridgeSession = require("../db/models/BridgeSession");
-              BridgeSession.create({ bambu_uid: userId, connected_at: new Date() })
-                .then((s) => { ws._bridgeSessionId = s._id; })
-                .catch(() => {});
-            });
+                // Track bridge session in DB
+                const BridgeSession = require("../db/models/BridgeSession");
+                BridgeSession.create({ bambu_uid: userId, connected_at: new Date() })
+                  .then((s) => {
+                    ws._bridgeSessionId = s._id;
+                  })
+                  .catch((err) => {
+                    log.warn(`[WS] BridgeSession.create failed for uid ${userId}: ${err.message}`);
+                  });
+              })
+              .catch((err) => {
+                log.error(`[WS] verifyBambuToken (bridge) threw: ${err.message}`);
+                try { ws.close(4500, "Auth check failed"); } catch {}
+              });
           } else {
             ws.close(4002, "Invalid auth");
           }
@@ -195,7 +211,9 @@ class WsManager {
           BridgeSession.updateOne(
             { _id: ws._bridgeSessionId },
             { disconnected_at: new Date(), last_active_at: new Date() }
-          ).catch(() => {});
+          ).catch((err) => {
+            log.warn(`[WS] BridgeSession.updateOne failed for uid ${userId}: ${err.message}`);
+          });
         }
         this.bridgeMeta.delete(ws);
         const set = this.bridges.get(userId);
@@ -227,11 +245,12 @@ class WsManager {
     const printerId = data.slice(3, 3 + printerIdLen).toString("utf8");
     const jpegPayload = data.slice(3 + printerIdLen);
 
-    // Throttle: skip frame if last relay was < 2s ago (saves ~100-150 GB/month egress)
+    // Throttle: skip frame if last relay was < ws.frameThrottle ms ago
+    // (saves ~100-150 GB/month egress).
     const throttleKey = `${userId}:${printerId}`;
     const now = Date.now();
     const lastRelay = this._frameThrottle?.get(throttleKey) || 0;
-    if (now - lastRelay < 2000) return; // skip, too soon
+    if (now - lastRelay < config.ws.frameThrottle) return; // skip, too soon
     if (!this._frameThrottle) this._frameThrottle = new Map();
     this._frameThrottle.set(throttleKey, now);
 
@@ -273,11 +292,17 @@ class WsManager {
     const clients = this.appClients.get(userId);
     if (!clients) return;
 
+    const idleThreshold = config.ws.appIdleThresholdMs;
     for (const appWs of clients) {
       const meta = this.appMeta.get(appWs);
-      if (meta && meta.subscribedPrinters.has(printerId) && appWs.readyState === 1) {
-        appWs.send(data, { binary: true });
-      }
+      if (!meta || !meta.subscribedPrinters.has(printerId)) continue;
+      if (appWs.readyState !== 1) continue;
+      // Skip clients whose JS thread has been suspended (iOS background) —
+      // detected by absence of the 25s heartbeat ping. Frames resume on the
+      // next ping when the app foregrounds.
+      const last = appWs._lastClientPingAt;
+      if (last && now - last > idleThreshold) continue;
+      appWs.send(data, { binary: true });
     }
   }
 
@@ -316,23 +341,32 @@ class WsManager {
 
       if (!authenticated) {
         if (msg.type === "app_auth" && msg.bambuToken) {
-          verifyBambuToken(msg.bambuToken).then((uid) => {
-            if (!uid) {
-              ws.close(4003, "Invalid Bambu token");
-              return;
-            }
-            authenticated = true;
-            userId = uid;
-            clearTimeout(authTimeout);
+          verifyBambuToken(msg.bambuToken)
+            .then((uid) => {
+              if (!uid) {
+                ws.close(4003, "Invalid Bambu token");
+                return;
+              }
+              authenticated = true;
+              userId = uid;
+              clearTimeout(authTimeout);
 
-            this.appMeta.set(ws, { userId, subscribedPrinters: new Set() });
-            if (!this.appClients.has(userId)) this.appClients.set(userId, new Set());
-            this.appClients.get(userId).add(ws);
+              this.appMeta.set(ws, { userId, subscribedPrinters: new Set() });
+              if (!this.appClients.has(userId)) this.appClients.set(userId, new Set());
+              this.appClients.get(userId).add(ws);
+              // Start the client-ping clock — _relayFrame skips clients whose
+              // last JSON ping is older than ws.appIdleThresholdMs (iOS
+              // suspends JS in background, so heartbeats stop).
+              ws._lastClientPingAt = Date.now();
 
-            const bridgeOnline = this.isBridgeConnected(uid);
-            ws.send(JSON.stringify({ type: "auth_ok", userId, bridgeOnline }));
-            log.debug(`[WS] App connected for uid ${userId} (bridge: ${bridgeOnline ? "online" : "offline"})`);
-          });
+              const bridgeOnline = this.isBridgeConnected(uid);
+              ws.send(JSON.stringify({ type: "auth_ok", userId, bridgeOnline }));
+              log.debug(`[WS] App connected for uid ${userId} (bridge: ${bridgeOnline ? "online" : "offline"})`);
+            })
+            .catch((err) => {
+              log.error(`[WS] verifyBambuToken (app) threw: ${err.message}`);
+              try { ws.close(4500, "Auth check failed"); } catch {}
+            });
         } else {
           ws.close(4002, "Invalid auth");
         }
@@ -342,6 +376,7 @@ class WsManager {
       // JSON ping from RN clients (can't use native ping/pong)
       if (msg.type === "ping") {
         ws._isAlive = true;
+        ws._lastClientPingAt = Date.now();
         return;
       }
 
@@ -528,7 +563,15 @@ class WsManager {
     this._lastDemandSig.set(userId, sig);
 
     log.debug(`[WS] demand_update → ${bridges.size} bridge(s): ${printerList.length} printer(s)`);
-    const msg = JSON.stringify({ type: "demand_update", printers: printerList });
+    // frameRateHint tells the bridge the minimum ms between frames it should
+    // send for any printer. Server already drops frames < frameThrottle ms
+    // apart on relay, so anything faster is pure wasted ingress (Bambu native
+    // cameras push 5-10 FPS — that's a 10-20× ingress reduction).
+    const msg = JSON.stringify({
+      type: "demand_update",
+      printers: printerList,
+      frameRateHint: config.ws.frameThrottle,
+    });
     for (const bridgeWs of bridges) {
       if (bridgeWs.readyState === 1) bridgeWs.send(msg);
     }
@@ -538,7 +581,11 @@ class WsManager {
     const demanded = this._getDemandedPrinters(userId);
     const printerList = Array.from(demanded).sort();
     this._lastDemandSig.set(userId, printerList.join(","));
-    bridgeWs.send(JSON.stringify({ type: "demand_update", printers: printerList }));
+    bridgeWs.send(JSON.stringify({
+      type: "demand_update",
+      printers: printerList,
+      frameRateHint: config.ws.frameThrottle,
+    }));
   }
 
   isBridgeConnected(userId) {
@@ -711,6 +758,9 @@ class WsManager {
   close() {
     if (this._heartbeatInterval) clearInterval(this._heartbeatInterval);
     if (this._graceSweepInterval) clearInterval(this._graceSweepInterval);
+    if (this._onPrinterStateChange) {
+      eventBus.off(EVENTS.PRINTER_STATE_CHANGE, this._onPrinterStateChange);
+    }
     if (this.wss) this.wss.close();
   }
 }

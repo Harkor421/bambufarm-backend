@@ -9,6 +9,12 @@ const MSG_CAMERA_FRAME = 0x01;
 const RECONNECT_BASE = 2000;
 const RECONNECT_MAX = 30000;
 const HEARTBEAT_INTERVAL = 25000;
+// Drop frames if we just sent one for this printer in the last N ms. The
+// server applies the same throttle on relay, so anything sent faster than
+// the server's threshold is wasted ingress. Server pushes the authoritative
+// value via demand_update.frameRateHint; this is the conservative default
+// before the first hint arrives.
+const DEFAULT_FRAME_THROTTLE_MS = 2000;
 
 class BridgeWsClient {
   /**
@@ -39,6 +45,8 @@ class BridgeWsClient {
     this.reconnectTimer = null;
     this.heartbeatTimer = null;
     this.stopped = false;
+    this.frameThrottleMs = DEFAULT_FRAME_THROTTLE_MS;
+    this._lastFrameSentAt = new Map(); // printerId → ms
   }
 
   connect() {
@@ -72,6 +80,9 @@ class BridgeWsClient {
           this.onStateChange("connected");
           this._startHeartbeat();
         } else if (msg.type === "demand_update") {
+          if (typeof msg.frameRateHint === "number" && msg.frameRateHint > 0) {
+            this.frameThrottleMs = msg.frameRateHint;
+          }
           this.onDemandUpdate(msg.printers || []);
         } else if (msg.type === "printer_command" && this.onCommand) {
           this.onCommand(msg);
@@ -101,6 +112,14 @@ class BridgeWsClient {
    */
   sendFrame(printerId, jpegData) {
     if (!this.authenticated || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    // Drop frames faster than the server's relay throttle — they'd just be
+    // discarded server-side, wasting upload bandwidth on the user's connection
+    // and ingress on the server.
+    const now = Date.now();
+    const last = this._lastFrameSentAt.get(printerId) || 0;
+    if (now - last < this.frameThrottleMs) return;
+    this._lastFrameSentAt.set(printerId, now);
 
     const idBuf = Buffer.from(printerId, "utf8");
     const header = Buffer.alloc(3);

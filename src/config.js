@@ -14,7 +14,11 @@ module.exports = {
     apiBase: "https://api.bambulab.com",
     mqttHost: "us.mqtt.bambulab.com",
     mqttPort: 8883,
-    pushallInterval: 60000,
+    // Full-state snapshot interval. Bambu pushes state changes via the report
+    // topic in real time, so pushall is just a periodic safety net for
+    // post-reconnect recovery. 180s keeps UX feeling live while cutting
+    // pushall egress 3× vs the old 60s cadence.
+    pushallInterval: 180000,
     reconnectDelay: 10000,
   },
 
@@ -61,10 +65,15 @@ module.exports = {
   publicCameraUid: process.env.PUBLIC_CAMERA_UID,
 
   ws: {
-    heartbeatInterval: 30000,
+    heartbeatInterval: 60000,
     frameThrottle: 2000, // min ms between frame relays
     commandTimeout: 10000,
     authTimeout: 15000,
+    // If an app client hasn't sent a JSON ping in this long, treat it as
+    // backgrounded (iOS suspends JS) and skip relaying frames to it. Resumes
+    // automatically on the next ping. Client heartbeat is 25s, so 70s gives
+    // ~3 missed beats of margin before we consider the client idle.
+    appIdleThresholdMs: 70000,
   },
 
   // Training data capture — uploads camera frames to R2 when prints end abnormally

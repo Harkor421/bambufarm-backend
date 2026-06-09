@@ -36,10 +36,11 @@ describe("config", () => {
   });
 
   it("has correct WS defaults", () => {
-    expect(config.ws.heartbeatInterval).toBe(30000);
+    expect(config.ws.heartbeatInterval).toBe(60000);
     expect(config.ws.frameThrottle).toBe(2000);
     expect(config.ws.commandTimeout).toBe(10000);
     expect(config.ws.authTimeout).toBe(15000);
+    expect(config.ws.appIdleThresholdMs).toBe(70000);
   });
 
   it("port defaults to 3000", () => {
