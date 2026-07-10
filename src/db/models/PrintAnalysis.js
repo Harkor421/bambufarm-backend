@@ -21,6 +21,10 @@ const printAnalysisSchema = new Schema(
 );
 
 printAnalysisSchema.index({ bambu_uid: 1, printer_dev_id: 1, analyzed_at: -1 });
+// GET /api/vision/history filters by printer_dev_id ALONE (no bambu_uid), which
+// the compound index above can't serve (bambu_uid is its prefix) — that query
+// was a COLLSCAN + in-memory sort. This covers it.
+printAnalysisSchema.index({ printer_dev_id: 1, analyzed_at: -1 });
 printAnalysisSchema.index({ analyzed_at: 1 }, { expireAfterSeconds: 30 * 24 * 3600 }); // 30-day TTL
 
 module.exports = model("PrintAnalysis", printAnalysisSchema);

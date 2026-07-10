@@ -15,6 +15,7 @@ const os = require("os");
 const bambuCloud = require("./bambuCloud");
 const { scanAndMatch, getLocalIp } = require("./networkScanner");
 const { createCameraStream } = require("./cameraStream");
+const { createRtspCameraStream } = require("./rtspCameraStream");
 const { BridgeWsClient } = require("./wsClient");
 const { PrinterMqttControl } = require("./mqttControl");
 const onvif = require("./onvifDiscovery");
@@ -167,10 +168,17 @@ function startCamera(printer) {
   const fail = cameraFailures.get(printer.devId);
   if (fail?.suspended) return;
 
-  console.log(`[Camera] Starting ${printer.name} (${printer.ip})`);
+  console.log(
+    `[Camera] Starting ${printer.name} (${printer.ip}, ${printer.protocol || "jpeg"})`
+  );
   streamStates.set(printer.devId, "connecting");
 
-  const stream = createCameraStream({
+  // Newer models (X1 / H2 family / P2S) stream RTSPS on port 322 instead of
+  // the port-6000 JPEG protocol — the scanner tags each match with `protocol`.
+  // Printers matched by older bridge versions have no protocol field → jpeg.
+  const createStream = printer.protocol === "rtsp" ? createRtspCameraStream : createCameraStream;
+
+  const stream = createStream({
     ip: printer.ip,
     accessCode: printer.accessCode,
     onFrame: (jpeg) => {

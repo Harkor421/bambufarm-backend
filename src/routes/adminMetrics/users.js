@@ -4,6 +4,7 @@ const BridgeSession = require("../../db/models/BridgeSession");
 const requireAdmin = require("../../middleware/adminAuth");
 const log = require("../../utils/logger");
 const { scheduleEmailBackfill } = require("./_shared");
+const { dedupeUsersByBambuUid } = require("../../utils/userDedup");
 
 /**
  * GET /api/admin/metrics/users?limit=100&hasBridge=1
@@ -41,38 +42,9 @@ module.exports = (router) => {
         .lean();
 
       // Dedup by bambu_uid: each human gets ONE row even if they registered the
-      // app on multiple devices. Users without a bambu_uid (failed Bambu auth)
-      // keep their own row keyed by _id so we don't collapse them all.
-      const groups = new Map();
-      for (const u of allUsers) {
-        const key = u.bambu_uid || `__nouid__${u._id}`;
-        const g = groups.get(key);
-        if (!g) {
-          groups.set(key, {
-            rep: u, // most recently updated wins
-            deviceCount: 1,
-            firstSeen: u.createdAt,
-            userIds: [u._id],
-            // Fall back across devices for fields the rep might be missing
-            // (older devices registered before bambu_email existed, etc.).
-            email: u.bambu_email || null,
-            account: u.bambu_account || null,
-            name: u.bambu_name || null,
-          });
-        } else {
-          g.deviceCount += 1;
-          g.userIds.push(u._id);
-          if (u.createdAt && (!g.firstSeen || u.createdAt < g.firstSeen)) g.firstSeen = u.createdAt;
-          if (!g.email && u.bambu_email) g.email = u.bambu_email;
-          if (!g.account && u.bambu_account) g.account = u.bambu_account;
-          if (!g.name && u.bambu_name) g.name = u.bambu_name;
-        }
-      }
-
-      const dedupedTotal = groups.size;
-      const dedupedSorted = [...groups.values()].sort(
-        (a, b) => new Date(b.rep.updatedAt) - new Date(a.rep.updatedAt)
-      );
+      // app on multiple devices. Shared, unit-tested helper (utils/userDedup).
+      const dedupedSorted = dedupeUsersByBambuUid(allUsers);
+      const dedupedTotal = dedupedSorted.length;
       const page = dedupedSorted.slice(offset, offset + limit);
 
       // Pull bridge + printer aggregates ONLY for the visible page.

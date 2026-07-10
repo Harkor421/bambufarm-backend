@@ -79,6 +79,10 @@ class WsManager {
 
     /** @type {Map<string, Map<string, Buffer>>} bambuUid → (printerId → latest JPEG) */
     this.latestFrames = new Map();
+    // Running total of bytes held in latestFrames — enforces a hard global RAM
+    // ceiling on top of the per-user cap, so a surge of connected bridges can't
+    // grow camera memory without bound. Kept in sync at every mutation site.
+    this._frameBytes = 0;
 
     this.wss = null;
   }
@@ -163,15 +167,34 @@ class WsManager {
                 this._sendDemandUpdate(ws, userId);
                 this._notifyBridgeStatus(userId, true);
 
-                // Track bridge session in DB
+                // Track bridge session in DB. A flapping bridge would otherwise
+                // insert a fresh row on every reconnect; instead reuse the most
+                // recent session for this uid when it's still open or closed
+                // <60s ago (reopen it) — only a genuinely-new session inserts.
                 const BridgeSession = require("../db/models/BridgeSession");
-                BridgeSession.create({ bambu_uid: userId, connected_at: new Date() })
-                  .then((s) => {
-                    ws._bridgeSessionId = s._id;
-                  })
-                  .catch((err) => {
-                    log.warn(`[WS] BridgeSession.create failed for uid ${userId}: ${err.message}`);
-                  });
+                (async () => {
+                  try {
+                    const now = new Date();
+                    const recent = await BridgeSession.findOne({ bambu_uid: userId })
+                      .sort({ connected_at: -1 })
+                      .lean();
+                    if (
+                      recent &&
+                      (!recent.disconnected_at || now - new Date(recent.disconnected_at) < 60000)
+                    ) {
+                      await BridgeSession.updateOne(
+                        { _id: recent._id },
+                        { disconnected_at: null, last_active_at: now }
+                      );
+                      ws._bridgeSessionId = recent._id;
+                    } else {
+                      const s = await BridgeSession.create({ bambu_uid: userId, connected_at: now });
+                      ws._bridgeSessionId = s._id;
+                    }
+                  } catch (err) {
+                    log.warn(`[WS] BridgeSession upsert failed for uid ${userId}: ${err.message}`);
+                  }
+                })();
               })
               .catch((err) => {
                 log.error(`[WS] verifyBambuToken (bridge) threw: ${err.message}`);
@@ -222,6 +245,8 @@ class WsManager {
         if (!this.isBridgeConnected(userId)) this._lastDemandSig.delete(userId);
         // Clean up cached frames and throttle entries for this user
         if (!this.isBridgeConnected(userId)) {
+          const uf = this.latestFrames.get(userId);
+          if (uf) for (const b of uf.values()) this._frameBytes -= b.length;
           this.latestFrames.delete(userId);
           if (this._frameThrottle) {
             for (const key of this._frameThrottle.keys()) {
@@ -259,14 +284,22 @@ class WsManager {
     const userFrames = this.latestFrames.get(userId);
     const isNewCamera = !userFrames.has(printerId);
     // Map preserves insertion order → delete before set = move-to-end = LRU
+    const prevBuf = userFrames.get(printerId);
+    if (prevBuf) this._frameBytes -= prevBuf.length;
     userFrames.delete(printerId);
     userFrames.set(printerId, jpegPayload);
+    this._frameBytes += jpegPayload.length;
     // Evict oldest if over cap (20 printers max per user is generous)
     const MAX_FRAMES_PER_USER = 20;
     while (userFrames.size > MAX_FRAMES_PER_USER) {
       const oldest = userFrames.keys().next().value;
+      const b = userFrames.get(oldest);
+      if (b) this._frameBytes -= b.length;
       userFrames.delete(oldest);
     }
+    // Global RAM ceiling across ALL users (rarely triggers; only when many
+    // bridges stream at once). Evicts globally-oldest frames until under budget.
+    this._enforceFrameBudget();
 
     // Broadcast to public clients if this is the public UID
     const publicUid = process.env.PUBLIC_CAMERA_UID;
@@ -276,7 +309,12 @@ class WsManager {
         const printers = this.getAvailableCameras(publicUid);
         const msg = JSON.stringify({ type: "ready", printers });
         for (const publicWs of this.publicClients) {
-          if (publicWs.readyState === 1) publicWs.send(msg);
+          // Guard each send: ws.send can throw synchronously if the socket
+          // transitioned to CLOSING after the readyState check. One bad socket
+          // must not abort the fan-out to every other client.
+          if (publicWs.readyState === 1) {
+            try { publicWs.send(msg); } catch {}
+          }
         }
         log.debug(`[WS] New public camera ${printerId}, notified ${this.publicClients.size} public client(s)`);
       }
@@ -284,7 +322,7 @@ class WsManager {
       // Relay binary frame to subscribed public clients
       for (const publicWs of this.publicClients) {
         if (publicWs.readyState === 1 && publicWs._publicPrinters && publicWs._publicPrinters.has(printerId)) {
-          publicWs.send(data, { binary: true });
+          try { publicWs.send(data, { binary: true }); } catch {}
         }
       }
     }
@@ -302,7 +340,9 @@ class WsManager {
       // next ping when the app foregrounds.
       const last = appWs._lastClientPingAt;
       if (last && now - last > idleThreshold) continue;
-      appWs.send(data, { binary: true });
+      // Guard each send (see note above) so one dead socket doesn't drop the
+      // frame for every other subscribed client.
+      try { appWs.send(data, { binary: true }); } catch {}
     }
   }
 
@@ -310,6 +350,38 @@ class WsManager {
    * Get the latest JPEG frame for a specific user and printer.
    * Used by the public camera endpoint.
    */
+  /**
+   * Enforce a hard global byte ceiling on cached camera frames. Evicts the
+   * oldest frame from each user in round-robin passes until under budget —
+   * each user's Map is insertion-ordered, so keys().next() is that user's
+   * oldest. O(1) amortized: only runs when the total exceeds the budget.
+   */
+  _enforceFrameBudget() {
+    const BUDGET = 256 * 1024 * 1024; // 256 MB
+    if (this._frameBytes <= BUDGET) return;
+    let guard = 0;
+    while (this._frameBytes > BUDGET && guard++ < 200000) {
+      let evicted = false;
+      for (const [uid, frames] of this.latestFrames) {
+        const oldest = frames.keys().next().value;
+        if (oldest === undefined) {
+          this.latestFrames.delete(uid);
+          continue;
+        }
+        const b = frames.get(oldest);
+        if (b) this._frameBytes -= b.length;
+        frames.delete(oldest);
+        if (frames.size === 0) this.latestFrames.delete(uid);
+        evicted = true;
+        if (this._frameBytes <= BUDGET) break;
+      }
+      if (!evicted) {
+        this._frameBytes = 0; // nothing left — correct any drift
+        break;
+      }
+    }
+  }
+
   getLatestFrame(userId, printerId) {
     const userFrames = this.latestFrames.get(userId);
     if (!userFrames) return null;
@@ -434,7 +506,7 @@ class WsManager {
         this._notifyBridgeDemand(publicUid);
 
         const printers = this.getAvailableCameras(publicUid);
-        ws.send(JSON.stringify({ type: "ready", printers }));
+        try { ws.send(JSON.stringify({ type: "ready", printers })); } catch {}
         log.debug(`[WS] Public client subscribed to ${msg.printers.length} cameras, ${printers.length} available`);
       } else if (msg.type === "ping") {
         ws._isAlive = true;
@@ -449,9 +521,11 @@ class WsManager {
 
     ws.on("error", (err) => log.error(`[WS] Public camera error: ${err.message}`));
 
-    // Send initial ready message with available cameras
+    // Send initial ready message with available cameras. Guard the send: an
+    // unauthenticated public client can disconnect between upgrade and this
+    // synchronous send, which would otherwise throw inside the connection handler.
     const printers = this.getAvailableCameras(publicUid);
-    ws.send(JSON.stringify({ type: "ready", printers }));
+    try { ws.send(JSON.stringify({ type: "ready", printers })); } catch {}
   }
 
   // ─── Demand tracking ───────────────────────────────────

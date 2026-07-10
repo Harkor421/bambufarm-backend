@@ -6,9 +6,14 @@
 module.exports = {
   port: Number(process.env.PORT) || 3000,
   mongoUri: process.env.MONGO_URI || "mongodb://localhost:27017/bambufarm",
+  // Optional override for the database NAME within the connection's cluster.
+  // Lets a staging deploy reuse production's MONGO_URI (same cluster) while
+  // reading/writing an isolated database (e.g. "bambufarm_staging"), so test
+  // traffic can never touch the production 10k-user data. Unset in production
+  // → mongoose uses whatever database the connection string specifies.
+  mongoDbName: process.env.MONGO_DB_NAME || undefined,
   apiKey: process.env.API_KEY,
   adminPassword: process.env.ADMIN_PASSWORD,
-  logLevel: process.env.LOG_LEVEL || "info",
 
   bambu: {
     apiBase: "https://api.bambulab.com",
@@ -61,8 +66,6 @@ module.exports = {
     broadcastUrl: process.env.TECNOPRINTS_URL || "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints",
     dedupWindow: 30000, // 30s
   },
-
-  publicCameraUid: process.env.PUBLIC_CAMERA_UID,
 
   ws: {
     heartbeatInterval: 60000,

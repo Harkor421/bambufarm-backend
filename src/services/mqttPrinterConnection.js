@@ -20,26 +20,52 @@ const BAMBU_API = config.bambu.apiBase;
 // How often a live connection re-fetches the account's bound-device list, so
 // printers that were offline when the connection was first built get picked
 // up without waiting for a server restart.
-const BIND_REFRESH_INTERVAL = 5 * 60 * 1000;
+// 15 min (not 5): each live connection re-polls Bambu's /user/bind on this
+// timer, so at 10k connections a 5-min interval sustained ~33 req/s to Bambu's
+// API — a fleet-wide rate-limit (429) hazard. 15 min cuts that ~3× (~11 req/s).
+// Discovery latency only affects printers that were OFFLINE at connect time (the
+// full device list is fetched immediately on connect); newly-powered printers
+// just take up to 15 min to appear instead of 5. Removing this timer entirely
+// (deferred) needs the poller to add printerIds to live connections first.
+const BIND_REFRESH_INTERVAL = 15 * 60 * 1000;
+// Offline detection. We sweep every minute; a printer is considered offline
+// when we haven't heard a report for longer than OFFLINE_THRESHOLD. The
+// threshold is 2 missed pushall cycles + a buffer, so a single dropped pushall
+// (or a momentarily slow printer) never produces a false "offline" alert.
+const OFFLINE_SWEEP_INTERVAL = 60 * 1000;
+const OFFLINE_THRESHOLD = PUSHALL_INTERVAL * 2 + 60 * 1000;
 
 class PrinterMqttConnection {
-  constructor({ userId, bambuUid, accessToken, printerIds, onStateChange, onProgressUpdate }) {
+  constructor({ userId, bambuUid, accessToken, printerIds, onStateChange, onProgressUpdate, onOffline }) {
     this.userId = userId;
     this.bambuUid = bambuUid;
     this.accessToken = accessToken;
     this.printerIds = printerIds; // Set of dev_ids
     this.onStateChange = onStateChange;
     this.onProgressUpdate = onProgressUpdate;
+    this.onOffline = onOffline; // called once when a previously-seen printer goes silent
     this.socket = null;
     this.connected = false;
+    this.connectedAt = 0;
     this.buf = Buffer.alloc(0);
     this.pushallTimer = null;
     this.pingTimer = null;
     this.reconnectTimer = null;
     this.bindRefreshTimer = null;
+    this.offlineSweepTimer = null;
     this.stopped = false;
     this.printerStates = new Map(); // devId → { gcode_state, mc_percent, mc_remaining_time, ... }
+    // Offline detection. lastReportAt is set ONLY when a printer actually
+    // reports — so a printer that was already offline when we connected (never
+    // reports) is never eligible, and we only ever fire on a real
+    // online→offline transition. offlineNotified dedups to "once per episode".
+    this.lastReportAt = new Map(); // devId → ts of last report
+    this.offlineNotified = new Set(); // devIds we've already pushed an offline alert for
     this.sequenceId = 0;
+    // Per-connection reconnect jitter (10-40s). At 10k connections a broker blip
+    // would otherwise trigger a synchronized TLS-handshake storm every
+    // RECONNECT_DELAY; the random spread flattens it.
+    this.reconnectPeriod = RECONNECT_DELAY + Math.floor(Math.random() * 30000);
   }
 
   connect() {
@@ -53,12 +79,20 @@ class PrinterMqttConnection {
         password: this.accessToken,
         clientId,
         rejectUnauthorized: false,
-        reconnectPeriod: RECONNECT_DELAY,
+        reconnectPeriod: this.reconnectPeriod,
         keepalive: 30,
       });
 
+      // Admin probes attach a transient per-call "message" listener (always
+      // removed in their cleanup). A burst of probes can briefly exceed Node's
+      // default 10-listener ceiling and emit a noisy MaxListenersExceededWarning;
+      // raise the cap so the warning doesn't fire. Not a leak — listeners are
+      // cleaned up on match/timeout.
+      this.client.setMaxListeners(50);
+
       this.client.on("connect", () => {
         this.connected = true;
+        this.connectedAt = Date.now();
         this.socket = this.client.stream; // for dead-connection check
         log.debug(`[MQTT] Connected for user ${this.userId} (${this.printerIds.size} printers)`);
         this._subscribeAll();
@@ -66,6 +100,8 @@ class PrinterMqttConnection {
         setTimeout(() => this._pushallAll(), 1000);
         // Periodic pushall
         this.pushallTimer = setInterval(() => this._pushallAll(), PUSHALL_INTERVAL);
+        // Offline sweep — fire onOffline once for any printer that stops reporting.
+        this.offlineSweepTimer = setInterval(() => this._checkOffline(), OFFLINE_SWEEP_INTERVAL);
         // Periodically re-fetch the bound-device list so a printer that was
         // offline at connect time gets subscribed without a server restart.
         this.bindRefreshTimer = setInterval(
@@ -326,6 +362,12 @@ class PrinterMqttConnection {
     const devId = match[1];
     if (!this.printerIds.has(devId)) return;
 
+    // Any report means the printer is alive. Record it for offline detection,
+    // and if it had been flagged offline, clear the flag so a future
+    // online→offline transition fires a fresh alert.
+    this.lastReportAt.set(devId, Date.now());
+    this.offlineNotified.delete(devId);
+
     let json;
     try {
       json = JSON.parse(payload.toString());
@@ -526,15 +568,42 @@ class PrinterMqttConnection {
     }
   }
 
+  /**
+   * Fire onOffline ONCE for any printer we've heard from that has now gone
+   * silent past OFFLINE_THRESHOLD. Re-arms automatically when the printer
+   * reports again (see _handlePublish).
+   */
+  _checkOffline() {
+    // Don't flag printers offline while OUR own MQTT link is down — that's our
+    // problem, not the printer's. And give a grace window after each (re)connect
+    // so the first pushall responses can land before we judge anyone offline.
+    if (!this.connected) return;
+    if (Date.now() - this.connectedAt < OFFLINE_THRESHOLD) return;
+
+    const now = Date.now();
+    for (const [devId, ts] of this.lastReportAt) {
+      if (this.offlineNotified.has(devId)) continue;
+      if (now - ts > OFFLINE_THRESHOLD) {
+        this.offlineNotified.add(devId);
+        log.info(`[MQTT] ${devId} went offline (no report for ${Math.round((now - ts) / 1000)}s)`);
+        Promise.resolve(this.onOffline?.(devId)).catch((e) =>
+          log.warn(`[MQTT] onOffline handler error for ${devId}: ${e.message}`)
+        );
+      }
+    }
+  }
+
   _stopTimers() {
     if (this.pushallTimer) clearInterval(this.pushallTimer);
     if (this.pingTimer) clearInterval(this.pingTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.bindRefreshTimer) clearInterval(this.bindRefreshTimer);
+    if (this.offlineSweepTimer) clearInterval(this.offlineSweepTimer);
     this.pushallTimer = null;
     this.pingTimer = null;
     this.reconnectTimer = null;
     this.bindRefreshTimer = null;
+    this.offlineSweepTimer = null;
   }
 }
 

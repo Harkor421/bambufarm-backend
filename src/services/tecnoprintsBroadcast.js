@@ -16,30 +16,6 @@ if (WHATSAPP_DISABLED) {
   log.warn("[TECNOPRINTS] WhatsApp broadcast DISABLED via DISABLE_WHATSAPP_BROADCAST env var");
 }
 
-let _lastBroadcast = { message: "", at: 0 };
-
-/**
- * Send a text-only broadcast. Deduplicates within 30s window.
- * @param {string} message
- */
-async function broadcastText(message) {
-  if (WHATSAPP_DISABLED) return;
-  if (!message) return;
-  // Deduplicate
-  if (message === _lastBroadcast.message && Date.now() - _lastBroadcast.at < config.tecnoprints.dedupWindow) return;
-  _lastBroadcast = { message, at: Date.now() };
-
-  try {
-    await axios.post(config.tecnoprints.broadcastUrl, { message }, {
-      timeout: 5000,
-      headers: { "Content-Type": "application/json" },
-    });
-    log.debug(`[TECNOPRINTS] Sent: "${message.slice(0, 80)}"`);
-  } catch (e) {
-    log.warn(`[TECNOPRINTS] Text broadcast failed: ${e.message}`);
-  }
-}
-
 /**
  * Send a broadcast with an optional camera frame image.
  * @param {string} message
@@ -114,4 +90,4 @@ function buildBroadcastMessage(gcState, prevGcodeState, printerName, jobName, pc
   return null;
 }
 
-module.exports = { broadcastText, broadcastWithImage, isTecnoprintsAccount, buildBroadcastMessage };
+module.exports = { broadcastWithImage, isTecnoprintsAccount, buildBroadcastMessage };

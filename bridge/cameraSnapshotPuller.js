@@ -21,13 +21,29 @@ function buildAuthHeader(username, password) {
   return `Basic ${token}`;
 }
 
+// SSRF guard. The bridge's local web UI is unauthenticated with wildcard CORS,
+// so a page or device on the LAN could POST a snapshotUrl and use the bridge as
+// a fetch proxy. IP cameras live on normal LAN ranges; block the cloud-metadata
+// link-local range (169.254.0.0/16, which includes 169.254.169.254) and require
+// http(s) so the bridge can't be steered at instance-metadata endpoints.
+function assertSafeCameraUrl(url) {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`Unsupported protocol: ${url.protocol}`);
+  }
+  const host = (url.hostname || "").toLowerCase();
+  if (/^169\.254\./.test(host) || host === "metadata.google.internal") {
+    throw new Error("Blocked host (link-local / cloud metadata)");
+  }
+}
+
 function fetchSnapshot(snapshotUrl, username, password) {
   return new Promise((resolve, reject) => {
     let url;
     try {
       url = new URL(snapshotUrl);
+      assertSafeCameraUrl(url);
     } catch (err) {
-      return reject(new Error(`Invalid URL: ${snapshotUrl}`));
+      return reject(new Error(err.message || `Invalid URL: ${snapshotUrl}`));
     }
     const lib = url.protocol === "https:" ? https : http;
     const headers = {};

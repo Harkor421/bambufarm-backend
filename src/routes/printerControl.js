@@ -6,35 +6,29 @@ const log = require("../utils/logger");
 
 const router = Router();
 
-// Resolve user — try expoPushToken first, then find by printerId in MQTT connections
+// Resolve the user STRICTLY from their own expoPushToken.
+//
+// SECURITY: control commands must only ever act on the caller's own printers.
+// The previous "find by printerId across all connections" and "first connected
+// user" fallbacks let any client holding the shared API key drive a stranger's
+// printer (pause/stop/speed) — a cross-tenant control hole. We now require a
+// token that maps to a user; commands are then routed through that user's own
+// bridge / MQTT connection (a printerId the user doesn't own simply fails to
+// send), so there is no path to another account's hardware.
 async function resolveUser(req, res) {
-  const { expoPushToken, printerId } = req.body;
+  const { expoPushToken } = req.body;
 
-  // Try by push token
-  if (expoPushToken) {
-    const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
-    if (user) return user;
+  if (!expoPushToken) {
+    res.status(401).json({ ok: false, error: "Missing expoPushToken" });
+    return null;
   }
 
-  // Fallback: find which MQTT connection owns this printer
-  if (printerId) {
-    for (const [userId, conn] of mqttService.connections) {
-      if (conn.printerIds.has(printerId)) {
-        const user = await User.findById(userId).lean();
-        if (user) return user;
-      }
-    }
+  const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+  if (!user) {
+    res.status(404).json({ ok: false, error: "User not found" });
+    return null;
   }
-
-  // Last resort: just use the first connected user (single-user setup)
-  if (mqttService.connections.size > 0) {
-    const firstUserId = mqttService.connections.keys().next().value;
-    const user = await User.findById(firstUserId).lean();
-    if (user) return user;
-  }
-
-  res.status(404).json({ ok: false, error: "User not found" });
-  return null;
+  return user;
 }
 
 /**
@@ -154,28 +148,34 @@ router.post("/printer/ams-filament", async (req, res) => {
   }
 });
 
-// GET /api/printer/mqtt-state — get real-time MQTT state for all printers
-// Accepts expoPushToken OR returns all states (printers are filtered client-side by ID)
+// GET /api/printer/mqtt-state — real-time MQTT state for the CALLER's printers.
+//
+// SECURITY: scoped strictly to the user identified by expoPushToken. The old
+// "aggregate all connected users' states" fallback leaked every user's live
+// telemetry (job titles, AMS, temps, progress) to anyone with the shared API
+// key. We now require the token and return ONLY that user's printers; an
+// unknown token gets an empty set, never the rest of the fleet.
 router.get("/printer/mqtt-state", async (req, res) => {
   try {
     const { expoPushToken } = req.query;
-
-    // Try to find user by push token, otherwise return all MQTT states
-    let states = {};
-    if (expoPushToken) {
-      const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
-      if (user) {
-        states = mqttService.getAllPrinterStates(String(user._id));
-      }
+    if (!expoPushToken) {
+      return res.status(401).json({ ok: false, error: "Missing expoPushToken" });
     }
 
-    // If no states found by token, aggregate all connected users' states
+    const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+    if (!user) {
+      // Unknown token — return empty. NEVER fall back to other users' states.
+      return res.json({ ok: true, printers: {} });
+    }
+
+    // Look up the connection by bambu_uid first (shared-account records like
+    // Tecnoprints share one connection), then fall back to user._id.
+    let states = {};
+    if (user.bambu_uid) {
+      states = mqttService.getAllPrinterStates(String(user.bambu_uid));
+    }
     if (Object.keys(states).length === 0) {
-      for (const conn of mqttService.connections.values()) {
-        for (const [devId, state] of conn.printerStates) {
-          states[devId] = state;
-        }
-      }
+      states = mqttService.getAllPrinterStates(String(user._id));
     }
 
     const { normalizeMqttState } = require("../utils/normalizeMqttState");

@@ -59,7 +59,11 @@ async function processUser(user) {
 }
 
 async function pollAllUsers() {
-  const users = await User.find({ fail_count: { $lt: 5 } }).lean();
+  // Exclude the growing la_activity_tokens Map — the poller only refreshes
+  // tokens and discovers printers; it never reads that field.
+  const users = await User.find({ fail_count: { $lt: 5 } })
+    .select("-la_activity_tokens")
+    .lean();
   if (users.length === 0) return;
 
   let refreshed = 0;

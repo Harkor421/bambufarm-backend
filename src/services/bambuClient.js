@@ -168,22 +168,5 @@ async function fetchNormalizedPrinters(accessToken) {
   });
 }
 
-async function fetchMessages(accessToken, { type, after, limit = 20 } = {}) {
-  const r = await axios.get(`${BAMBU_BASE}/v1/user-service/my/messages`, {
-    timeout: 15000,
-    params: {
-      ...(type != null ? { type } : {}),
-      ...(after ? { after } : {}),
-      limit,
-    },
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-  const data = r.data?.data ?? r.data;
-  return Array.isArray(data?.hits) ? data.hits : [];
-}
-
-module.exports = { fetchPrinters, fetchTasks, fetchNormalizedPrinters, fetchMessages, pick };
+// fetchPrinters + pick stay module-private (used by fetchNormalizedPrinters).
+module.exports = { fetchTasks, fetchNormalizedPrinters };

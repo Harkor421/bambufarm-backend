@@ -1,6 +1,7 @@
 const { Router } = require("express");
 const wsManager = require("../services/wsManager");
 const PrinterState = require("../db/models/PrinterState");
+const User = require("../db/models/User");
 const log = require("../utils/logger");
 
 const router = Router();
@@ -18,16 +19,35 @@ router.get("/bridge/status", (req, res) => {
   });
 });
 
-// GET /api/printer/frame/:uid/:printerId — latest camera frame as JPEG
-router.get("/printer/frame/:uid/:printerId", (req, res) => {
-  const { uid, printerId } = req.params;
-  const frame = wsManager.getLatestFrame(uid, printerId);
-  if (!frame) {
-    return res.status(404).end();
+// GET /api/printer/frame/:uid/:printerId — latest camera frame as JPEG.
+//
+// SECURITY: the camera frame for a printer is private. This endpoint previously
+// returned the latest JPEG for ANY uid+printerId behind only the shared API
+// key, so anyone who enumerated device IDs could pull a stranger's live camera.
+// Require the caller's expoPushToken and verify the requested uid is the
+// caller's OWN Bambu account before returning any frame.
+router.get("/printer/frame/:uid/:printerId", async (req, res) => {
+  try {
+    const { uid, printerId } = req.params;
+    const { expoPushToken } = req.query;
+    if (!expoPushToken) return res.status(401).end();
+
+    const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+    if (!user || String(user.bambu_uid) !== String(uid)) {
+      return res.status(403).end();
+    }
+
+    const frame = wsManager.getLatestFrame(uid, printerId);
+    if (!frame) {
+      return res.status(404).end();
+    }
+    res.set("Content-Type", "image/jpeg");
+    res.set("Cache-Control", "no-store");
+    res.send(frame);
+  } catch (err) {
+    log.error(`[API] frame error: ${err.message}`);
+    res.status(500).end();
   }
-  res.set("Content-Type", "image/jpeg");
-  res.set("Cache-Control", "no-store");
-  res.send(frame);
 });
 
 // GET /api/printer-states — notification-driven printer states
@@ -39,7 +59,6 @@ router.get("/printer-states", async (req, res) => {
   }
 
   try {
-    const User = require("../db/models/User");
     const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
     if (!user) {
       return res.status(404).json({ ok: false, error: "User not found" });

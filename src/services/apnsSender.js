@@ -61,18 +61,24 @@ function getJWT() {
 }
 
 function getClient(sandbox = false) {
+  // Close over the SPECIFIC client instance and only clear the cached ref if it
+  // still points at this same connection. A transient error/close firing on an
+  // old session after getClient() already replaced the cached client must not
+  // null out the live one (that caused connection thrash + dropped LA updates).
   if (sandbox) {
     if (h2ClientSandbox && !h2ClientSandbox.closed && !h2ClientSandbox.destroyed) return h2ClientSandbox;
-    h2ClientSandbox = http2.connect(`https://${APNS_HOST_SANDBOX}`);
-    h2ClientSandbox.on("error", (err) => { log.error(`[APNS] Sandbox HTTP/2 error: ${err.message}`); h2ClientSandbox = null; });
-    h2ClientSandbox.on("close", () => { h2ClientSandbox = null; });
-    return h2ClientSandbox;
+    const c = http2.connect(`https://${APNS_HOST_SANDBOX}`);
+    h2ClientSandbox = c;
+    c.on("error", (err) => { log.error(`[APNS] Sandbox HTTP/2 error: ${err.message}`); if (h2ClientSandbox === c) h2ClientSandbox = null; });
+    c.on("close", () => { if (h2ClientSandbox === c) h2ClientSandbox = null; });
+    return c;
   }
   if (h2Client && !h2Client.closed && !h2Client.destroyed) return h2Client;
-  h2Client = http2.connect(`https://${APNS_HOST}`);
-  h2Client.on("error", (err) => { log.error(`[APNS] HTTP/2 error: ${err.message}`); h2Client = null; });
-  h2Client.on("close", () => { h2Client = null; });
-  return h2Client;
+  const c = http2.connect(`https://${APNS_HOST}`);
+  h2Client = c;
+  c.on("error", (err) => { log.error(`[APNS] HTTP/2 error: ${err.message}`); if (h2Client === c) h2Client = null; });
+  c.on("close", () => { if (h2Client === c) h2Client = null; });
+  return c;
 }
 
 /**

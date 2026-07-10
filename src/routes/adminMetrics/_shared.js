@@ -28,8 +28,13 @@ let _emailBackfillSlots = 5;
 const _emailBackfillQueue = [];
 
 async function _runBackfillOne(user) {
+  // Dedup is handled in _emailBackfillTick (which skips already-inflight users
+  // WITHOUT spending a slot). This function is only ever entered after a slot
+  // has been consumed, and its try/finally below always restores that slot —
+  // so there is no early return here that could leak a slot. _runBackfillOne
+  // adds the id to the inflight set synchronously (before the first await), so
+  // the tick loop's next iteration sees it.
   const id = String(user._id);
-  if (_emailBackfillInflight.has(id)) return;
   _emailBackfillInflight.add(id);
   try {
     const axios = require("axios");
@@ -64,6 +69,11 @@ async function _runBackfillOne(user) {
 function _emailBackfillTick() {
   while (_emailBackfillSlots > 0 && _emailBackfillQueue.length > 0) {
     const u = _emailBackfillQueue.shift();
+    // Skip a user that's already running — but DON'T spend a slot on them.
+    // (Previously the slot was decremented here and the duplicate's early
+    // return in _runBackfillOne never gave it back, permanently leaking slots
+    // until the queue stopped draining.)
+    if (_emailBackfillInflight.has(String(u._id))) continue;
     _emailBackfillSlots -= 1;
     _runBackfillOne(u);
   }

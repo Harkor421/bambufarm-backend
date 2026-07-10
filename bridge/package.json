@@ -1,7 +1,12 @@
 {
   "name": "bambubridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "BambuBridge — relay your Bambu Lab printer cameras to the cloud",
+  "author": {
+    "name": "DEGEN TECH SAS",
+    "email": "aerustudiohelp@gmail.com"
+  },
+  "homepage": "https://bambufarm.app",
   "main": "electron-main.js",
   "bin": {
     "bambubridge": "./index.js"
@@ -24,7 +29,8 @@
     "files": [
       "**/*",
       "!dist/**",
-      "!dist-electron/**"
+      "!dist-electron/**",
+      "!node_modules/ffmpeg-static/**"
     ],
     "mac": {
       "category": "public.app-category.utilities",
@@ -37,7 +43,10 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ],
       "icon": "icon.icns"
@@ -46,7 +55,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "icon.ico"
@@ -60,7 +71,10 @@
       "runAfterFinish": true
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "icon.png",
       "category": "Utility"
     }
@@ -74,5 +88,8 @@
   "devDependencies": {
     "electron": "^28.3.3",
     "electron-builder": "^25.0.0"
+  },
+  "optionalDependencies": {
+    "ffmpeg-static": "^5.3.0"
   }
 }

@@ -31,6 +31,10 @@ class MqttPrinterService {
   constructor() {
     /** @type {Map<string, PrinterMqttConnection>} userId → connection */
     this.connections = new Map();
+    /** @type {Map<string, PrinterMqttConnection>} bambuUid → connection.
+     * Parallel index so _findConnectionByUserId is O(1) instead of an
+     * O(connections) linear scan on every control command + mqtt-state poll. */
+    this.connectionsByUid = new Map();
     this.pollTimer = null;
   }
 
@@ -51,6 +55,7 @@ class MqttPrinterService {
       conn.stop();
     }
     this.connections.clear();
+    this.connectionsByUid.clear();
     log.info("[MQTT] Service stopped");
   }
 
@@ -122,11 +127,10 @@ class MqttPrinterService {
   // ── Internal ─────────────────────────────────
 
   _findConnectionByUserId(userId) {
-    // userId could be MongoDB _id string or Bambu uid
-    for (const [key, conn] of this.connections) {
-      if (key === String(userId) || conn.bambuUid === String(userId)) return conn;
-    }
-    return null;
+    // userId may be a MongoDB _id string OR a Bambu uid — O(1) via both indexes
+    // (replaces a linear scan over all connections that ran on every request).
+    const k = String(userId);
+    return this.connections.get(k) || this.connectionsByUid.get(k) || null;
   }
 
   async _connectAllUsers() {
@@ -137,7 +141,13 @@ class MqttPrinterService {
     this._connectingUsers = true;
     try {
       log.debug("[MQTT] Connecting all users...");
-      const users = await User.find({ fail_count: { $lt: 5 } }).lean();
+      // Exclude the growing la_activity_tokens Map — this loop only needs the
+      // connection/token fields, and shipping every user's LA-token map on the
+      // 120s fleet scan is the bulk of the payload at 10k users. Notification/LA
+      // callbacks re-query users fresh, so the Map is never read from here.
+      const users = await User.find({ fail_count: { $lt: 5 } })
+        .select("-la_activity_tokens")
+        .lean();
       log.debug(`[MQTT] ${users.length} users`);
 
       // Track connected Bambu UIDs to avoid duplicate MQTT connections.
@@ -162,6 +172,9 @@ class MqttPrinterService {
           log.debug(`[MQTT] User ${id} connection is dead, reconnecting...`);
           existing.stop();
           this.connections.delete(id);
+          if (existing.bambuUid && this.connectionsByUid.get(String(existing.bambuUid)) === existing) {
+            this.connectionsByUid.delete(String(existing.bambuUid));
+          }
         }
 
         // Early skip: if bambu_uid is cached and already connected, no API call needed
@@ -299,6 +312,41 @@ class MqttPrinterService {
                 }
               }
             },
+            onOffline: async (devId) => {
+              // A printer we'd been hearing from went silent. Notify every
+              // device on this Bambu account ONCE — the connection dedups and
+              // re-arms only when the printer reports again, so the user gets a
+              // single "went offline" push per offline episode.
+              try {
+                const printerName = printerNames[devId] || devId;
+                const recipients = await User.find({
+                  bambu_uid: bambuUid,
+                  expo_push_token: { $exists: true, $ne: null },
+                  fail_count: { $lt: 5 },
+                }).lean();
+                const notif = {
+                  title: `🔌 ${printerName} went offline`,
+                  body: "The printer stopped responding.",
+                  data: { type: "printer_offline", printerId: devId, printerName },
+                };
+                const sentTokens = new Set();
+                for (const u of recipients) {
+                  if (sentTokens.has(u.expo_push_token)) continue;
+                  sentTokens.add(u.expo_push_token);
+                  await sendPush(u.expo_push_token, notif);
+                }
+                // Reflect offline in the notification-driven state the app reads.
+                if (recipients.length > 0) {
+                  await PrinterState.updateMany(
+                    { user_id: { $in: recipients.map((u) => u._id) }, printer_dev_id: devId },
+                    { notif_status: "offline" }
+                  ).catch(() => {});
+                }
+                log.info(`[MQTT] offline alert for ${printerName} → ${sentTokens.size} token(s)`);
+              } catch (e) {
+                log.warn(`[MQTT] onOffline dispatch error: ${e.message}`);
+              }
+            },
             onProgressUpdate: async (devId, state) => {
               // Update LA via activity update token (push-to-start only works for "start" event)
               const allUsers = await User.find({ bambu_uid: bambuUid, fail_count: { $lt: 5 } }).lean();
@@ -336,6 +384,7 @@ class MqttPrinterService {
           });
 
           this.connections.set(id, conn);
+          if (conn.bambuUid) this.connectionsByUid.set(String(conn.bambuUid), conn);
           conn.connect();
         } catch (err) {
           const status = err.response?.status;

@@ -11,4 +11,11 @@ const bridgeSessionSchema = new Schema(
   { timestamps: true }
 );
 
+// Bound the collection: it grows one row per bridge connect, unbounded
+// otherwise. 90-day TTL also backs adminMetrics/overview.js range scans.
+// Semantic note: "bridges ever used" becomes "used within 90d", and a
+// >90d-old still-open session row expires (the metrics routes degrade
+// gracefully).
+bridgeSessionSchema.index({ connected_at: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
+
 module.exports = model("BridgeSession", bridgeSessionSchema);

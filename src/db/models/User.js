@@ -12,7 +12,10 @@ const userSchema = new Schema(
     bambu_account: { type: String, default: null },
     bambu_name: { type: String, default: null },
     bambu_access_token: { type: String, required: true, index: true },
-    bambu_refresh_token: { type: String, required: true },
+    // Indexed (non-unique): tokenRefresh does a compare-and-swap
+    // updateMany({ bambu_refresh_token }) that would otherwise full-scan the
+    // whole users collection on every refresh.
+    bambu_refresh_token: { type: String, required: true, index: true },
     bambu_token_expires_at: { type: Number, required: true },
     fail_count: { type: Number, default: 0 },
     // ActivityKit push tokens for Live Activities
