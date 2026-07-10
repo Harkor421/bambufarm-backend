@@ -1,8 +1,16 @@
 const { Router } = require("express");
 const PrintAnalysis = require("../db/models/PrintAnalysis");
+const requireAdmin = require("../middleware/adminAuth");
 const log = require("../utils/logger");
 
 const router = Router();
+
+// SECURITY: these are operator/Tecnoprints-only endpoints, NOT user-facing (the
+// mobile app never calls /vision/*). They were gated ONLY by the shared,
+// app-embedded API key — so any client holding it could POST /vision/test-broadcast
+// to fire a real Tecnoprints WhatsApp broadcast and read per-printer AI analysis.
+// Require the admin password, matching admin.js.
+router.use("/vision", requireAdmin);
 
 // GET /api/vision/history/:printerId — last N analyses for a printer
 router.get("/vision/history/:printerId", async (req, res) => {
@@ -57,7 +65,7 @@ router.get("/vision/status", async (req, res) => {
       ok: true,
       enabled,
       targetUid,
-      model: "claude-sonnet-4-5-20251001",
+      model: cfg.vision.model,
       printers: Object.values(byPrinter),
     });
   } catch (err) {

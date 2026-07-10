@@ -95,8 +95,13 @@ router.post("/printer/speed", (req, res) => {
 // POST /api/printer/light
 router.post("/printer/light", (req, res) => {
   const { on } = req.body;
-  if (on === undefined) return res.status(400).json({ ok: false, error: "Missing on" });
-  void handleCommand(req, res, "light", () => ({ on: !!on }));
+  // Require a real boolean. The old `!!on` coerced truthy strings, so a client
+  // sending {on:"false"} or {on:"0"} would turn the light ON — the opposite of
+  // intent. The app always sends a boolean; reject anything else.
+  if (typeof on !== "boolean") {
+    return res.status(400).json({ ok: false, error: "on must be a boolean" });
+  }
+  void handleCommand(req, res, "light", () => ({ on }));
 });
 
 // POST /api/printer/ams-filament — update an AMS slot's color/material/temp

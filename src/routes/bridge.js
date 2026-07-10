@@ -6,11 +6,26 @@ const log = require("../utils/logger");
 
 const router = Router();
 
-// GET /api/bridge/status?userId=xxx — check if a bridge is online for this user
-router.get("/bridge/status", (req, res) => {
-  const { userId } = req.query;
+// GET /api/bridge/status?userId=xxx&expoPushToken=yyy — is a bridge online for this user
+//
+// SECURITY: userId is a Bambu uid taken from the query. Without an ownership
+// check, any shared-API-key holder could enumerate arbitrary uids and learn
+// whether each account has a local bridge online. The sibling endpoints
+// (printer/frame, mqtt-state, all control) require expoPushToken + verify
+// ownership; this one was missed. Require the caller's token and confirm the
+// requested uid is their OWN account.
+router.get("/bridge/status", async (req, res) => {
+  const { userId, expoPushToken } = req.query;
   if (!userId) {
     return res.status(400).json({ ok: false, error: "Missing userId" });
+  }
+  if (!expoPushToken) {
+    return res.status(401).json({ ok: false, error: "Missing expoPushToken" });
+  }
+
+  const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+  if (!user || String(user.bambu_uid) !== String(userId)) {
+    return res.status(403).json({ ok: false, error: "Unauthorized" });
   }
 
   res.json({

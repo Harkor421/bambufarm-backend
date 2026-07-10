@@ -139,15 +139,34 @@ module.exports = (router) => {
           error: "Required: bambuUid, printerId, trayId, trayColor (RRGGBBAA hex), trayType",
         });
       }
+      // The handler advertised "RRGGBBAA hex" but validated only presence, so
+      // garbage (trayColor:"zzz", trayType:123) was forwarded verbatim to the
+      // printer over MQTT, and Number() on non-numeric ids produced NaN. Validate
+      // the color (6 or 8 hex digits) and guard the numeric coercions.
+      if (!/^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/.test(String(trayColor))) {
+        return res.status(400).json({ ok: false, error: "trayColor must be 6 or 8 hex digits (RRGGBB[AA])" });
+      }
+      const amsNum = Number(amsId);
+      const trayNum = Number(trayId);
+      const tempMin = nozzleTempMin != null ? Number(nozzleTempMin) : undefined;
+      const tempMax = nozzleTempMax != null ? Number(nozzleTempMax) : undefined;
+      if (
+        !Number.isFinite(amsNum) ||
+        !Number.isFinite(trayNum) ||
+        (tempMin != null && !Number.isFinite(tempMin)) ||
+        (tempMax != null && !Number.isFinite(tempMax))
+      ) {
+        return res.status(400).json({ ok: false, error: "amsId, trayId and nozzle temps must be numbers" });
+      }
       const mqttService = require("../../services/mqttPrinterService");
       const sent = mqttService.setAmsFilament(String(bambuUid), printerId, {
-        amsId: Number(amsId),
-        trayId: Number(trayId),
+        amsId: amsNum,
+        trayId: trayNum,
         trayColor,
         trayType,
         trayInfoIdx,
-        nozzleTempMin: nozzleTempMin != null ? Number(nozzleTempMin) : undefined,
-        nozzleTempMax: nozzleTempMax != null ? Number(nozzleTempMax) : undefined,
+        nozzleTempMin: tempMin,
+        nozzleTempMax: tempMax,
       });
       if (!sent) {
         return res.status(503).json({
@@ -244,8 +263,12 @@ module.exports = (router) => {
         await new Promise((r) => setTimeout(r, 500));
       }
 
+      // Top-level ok reflects whether ANY command was actually sent. A probe
+      // against a fully unreachable printer (every verdict "not_sent",
+      // "no MQTT connection") is a failure, not a success — a monitor keying on
+      // `ok` should not read a total no-op as green.
       res.json({
-        ok: true,
+        ok: results.some((r) => r.sent),
         bambuUid,
         printerId,
         results,

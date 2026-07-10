@@ -45,8 +45,11 @@ router.get("/mqtt-debug", async (_req, res) => {
         printerStates: printers,
       });
     }
-    // Filter to show only connections for uid 1789751384
-    const mine = result.filter(r => r.bambuUid === "1789751384");
+    // Optionally spotlight one uid's connections for debugging. Was a hardcoded
+    // personal uid shipping in prod code — now driven by the DEBUG_UID env var
+    // (unset -> no spotlight), so no personal identifier lives in the source.
+    const debugUid = process.env.DEBUG_UID || null;
+    const mine = debugUid ? result.filter(r => r.bambuUid === debugUid) : [];
     res.json({ total: result.length, connected: result.filter(r => r.connected).length, myConnections: mine, sample: result.slice(0, 3) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });

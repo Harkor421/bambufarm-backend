@@ -67,6 +67,15 @@ function frameEtag(buf) {
 
 // GET /api/public/cameras/:printerId/frame — latest JPEG frame
 router.get("/public/cameras/:printerId/frame", frameLimiter, checkUid, (req, res) => {
+  // Enforce the A1 exclusion here too, not just in the list handler. The frame
+  // cache holds frames for EVERY streaming printer, so without this a public
+  // caller who knows/guesses an excluded A1 dev id could pull its JPEG directly,
+  // bypassing the owner's opt-out. 404 (same as no-frame) — don't reveal that
+  // the id exists but is excluded.
+  if (EXCLUDED_PREFIXES.some((p) => req.params.printerId.startsWith(p))) {
+    return res.status(404).json({ ok: false, error: "No frame available" });
+  }
+
   const frame = wsManager.getLatestFrame(ALLOWED_UID, req.params.printerId);
   if (!frame) {
     return res.status(404).json({ ok: false, error: "No frame available" });

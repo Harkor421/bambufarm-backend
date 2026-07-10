@@ -20,16 +20,17 @@ router.post("/admin/broadcast", requireAdmin, async (req, res) => {
     let sent = 0;
     let failed = 0;
     for (const u of users) {
-      try {
-        await sendPush(u.expo_push_token, {
-          title,
-          body,
-          data: { type: "admin_broadcast", ...(data || {}) },
-        });
-        sent++;
-      } catch {
-        failed++;
-      }
+      // sendPush never throws — it returns null on network/HTTP failure and
+      // { deviceNotRegistered: true } on a dead token, so the old try/catch's
+      // `failed++` was unreachable and every non-delivery was counted as sent.
+      // Count only a genuine Expo ticket response as delivered.
+      const result = await sendPush(u.expo_push_token, {
+        title,
+        body,
+        data: { type: "admin_broadcast", ...(data || {}) },
+      });
+      if (result && !result.deviceNotRegistered) sent++;
+      else failed++;
     }
 
     log.info(`[ADMIN] Broadcast sent: ${sent} delivered, ${failed} failed, "${title}"`);

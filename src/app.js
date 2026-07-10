@@ -82,10 +82,28 @@ const globalLimiter = rateLimit({
   legacyHeaders: false,
   message: { ok: false, error: "Too many requests, try again later" },
 });
+
+// Admin-metrics brute-force guard. This surface is exempt from the API key and
+// the global limiter (the admin dashboard polls it heavily, incl. live camera
+// <img> frames), so the ONLY protection for the user PII behind it is the admin
+// password — with no throttle it could be brute-forced at full request rate.
+// Count ONLY 403s (wrong password) toward the limit: successful dashboard
+// traffic (200s) and empty-frame 404s are skipped, so the dashboard is never
+// throttled while wrong-password attempts are capped per IP.
+const adminMetricsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 50,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: (req, res) => res.statusCode !== 403,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "Too many attempts, try again later" },
+});
+
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/public/")) return next();
   if (req.path.startsWith("/api/printer/mqtt-state")) return next();
-  if (req.path.startsWith("/api/admin/metrics/")) return next();
+  if (req.path.startsWith("/api/admin/metrics/")) return adminMetricsLimiter(req, res, next);
   globalLimiter(req, res, next);
 });
 
@@ -105,10 +123,22 @@ app.use("/api", printVisionRoutes);
 app.use("/api", adminRoutes);
 app.use("/api", adminMetricsRoutes);
 
-// Global error handler
+// Global error handler. Honor err.status/err.statusCode so body-parser's client
+// errors surface with the right code — malformed JSON as 400 and oversized
+// bodies (>10kb) as 413 — instead of masquerading as 500. Only genuine 5xx are
+// logged at error (with stack); client 4xx log at warn so a stream of malformed
+// requests can't pollute 5xx alerting.
 app.use((err, req, res, _next) => {
-  log.error("[EXPRESS]", err.stack || err.message);
-  res.status(500).json({ ok: false, error: "Internal server error" });
+  const status = err.status || err.statusCode || 500;
+  if (status >= 500) {
+    log.error("[EXPRESS]", err.stack || err.message);
+  } else {
+    log.warn(`[EXPRESS] ${status} ${req.method} ${req.path}: ${err.message}`);
+  }
+  res.status(status).json({
+    ok: false,
+    error: status >= 500 ? "Internal server error" : err.message || "Bad request",
+  });
 });
 
 // Surface unhandled promise rejections + uncaught exceptions in the logs
