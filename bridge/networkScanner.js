@@ -264,42 +264,53 @@ async function scanAndMatch(cloudDevices, onProgress) {
     progress: 0.65,
   });
 
-  // Match IPs to cloud devices. Prefer the JPEG port when both are open (it's
-  // the protocol older firmwares expose reliably); fall back to RTSP.
+  // Match IPs to cloud devices. Each found IP finds its own device by trying
+  // access codes; a JPEG candidate uses the fast port-6000 auth, an RTSP
+  // candidate the slower RTSP DESCRIBE (up to a few seconds per wrong code).
+  //
+  // Candidates are matched CONCURRENTLY. `found` only holds IPs with a camera
+  // port open (a handful), and each candidate only ever hits its OWN IP, so the
+  // per-printer auth load is unchanged — but a slow RTSP verify on one printer
+  // no longer serializes the whole scan. Total match time is bounded by the
+  // slowest single candidate instead of the sum, so the scan stops looking hung.
   const devicesWithCodes = cloudDevices.filter((d) => d.dev_access_code);
-  const matched = [];
-  const matchedDevIds = new Set();
-  const matchedIps = new Set();
 
-  for (const cand of found) {
+  async function matchCandidate(cand) {
     for (const device of devicesWithCodes) {
-      if (matchedDevIds.has(device.dev_id) || matchedIps.has(cand.ip)) continue;
-
       let protocol = null;
       if (cand.jpeg && (await tryAuth(cand.ip, device.dev_access_code))) {
         protocol = "jpeg";
       } else if (cand.rtsp && (await verifyRtsp(cand.ip, device.dev_access_code))) {
         protocol = "rtsp";
       }
-
-      if (protocol) {
-        matched.push({
-          devId: device.dev_id,
-          name: device.name || device.dev_id,
-          ip: cand.ip,
-          accessCode: device.dev_access_code,
-          protocol,
-        });
-        matchedDevIds.add(device.dev_id);
-        matchedIps.add(cand.ip);
-        onProgress({
-          type: "match",
-          message: `Matched ${device.name || device.dev_id} → ${cand.ip} (${protocol})`,
-          progress: 0.65 + (matched.length / found.length) * 0.3,
-        });
-        break;
-      }
+      if (protocol) return { cand, device, protocol };
     }
+    return null;
+  }
+
+  const candidateResults = await Promise.all(found.map(matchCandidate));
+
+  // Collapse to a unique dev_id ↔ ip mapping (first result wins on the rare
+  // collision of two IPs answering to the same access code) and emit progress.
+  const matched = [];
+  const matchedDevIds = new Set();
+  const matchedIps = new Set();
+  for (const r of candidateResults) {
+    if (!r || matchedDevIds.has(r.device.dev_id) || matchedIps.has(r.cand.ip)) continue;
+    matched.push({
+      devId: r.device.dev_id,
+      name: r.device.name || r.device.dev_id,
+      ip: r.cand.ip,
+      accessCode: r.device.dev_access_code,
+      protocol: r.protocol,
+    });
+    matchedDevIds.add(r.device.dev_id);
+    matchedIps.add(r.cand.ip);
+    onProgress({
+      type: "match",
+      message: `Matched ${r.device.name || r.device.dev_id} → ${r.cand.ip} (${r.protocol})`,
+      progress: 0.65 + (matched.length / found.length) * 0.3,
+    });
   }
 
   onProgress({
