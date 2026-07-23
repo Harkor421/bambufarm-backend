@@ -87,10 +87,14 @@ async function getAccessToken() {
       saveConfig();
       console.log("[Auth] Token refreshed");
     } catch (err) {
-      console.error("[Auth] Refresh failed:", err.message || err);
-      config.bambuTokens = null;
-      saveConfig();
-      return null;
+      // Refresh is BEST-EFFORT. Bambu is known to 401 the refresh endpoint even
+      // when the current access token is still valid, so a refresh failure must
+      // NOT log the user out. Nulling the tokens here silently killed every
+      // camera and stopped the bridge auto-starting on next launch. Keep the
+      // existing token (only reassigned on success above) and let a definitive
+      // 401 on a real API call be what forces re-auth.
+      console.error("[Auth] Refresh failed (best-effort, keeping current token):", err.message || err);
+      return config.bambuTokens.accessToken;
     }
   }
   return config.bambuTokens.accessToken;
@@ -118,6 +122,19 @@ async function discoverPrinters() {
   config.printers = matched;
   saveConfig();
   scanProgress = null;
+
+  // If this was a re-scan while the bridge is live, rebuild it from the new
+  // device list. Running camera closures and MQTT clients captured the OLD
+  // ip/accessCode, so without a rebuild a printer whose LAN IP changed keeps
+  // streaming (black) from its stale address, its control MQTT stays pinned to
+  // the old IP, and printers dropped from the scan leak their MQTT client.
+  // stopBridge tears down cameras + MQTT + demand cleanly; startBridge
+  // reconnects everything from config.printers.
+  if (bridgeRunning) {
+    stopBridge();
+    await startBridge();
+  }
+
   return matched;
 }
 
@@ -1015,7 +1032,7 @@ async function startServer() {
   return server;
 }
 
-module.exports = { startServer, startWebUI, UI_PORT };
+module.exports = { startServer, startWebUI, stopBridge, UI_PORT };
 
 // ─── Main (standalone mode) ─────────────────────────────
 

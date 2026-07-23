@@ -13,7 +13,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // Start the bridge server
-const { startWebUI } = require("./index");
+const { startServer, stopBridge } = require("./index");
 
 let mainWindow = null;
 let tray = null;
@@ -71,8 +71,12 @@ function createTray() {
 }
 
 app.whenReady().then(async () => {
-  // Start the web UI server
-  await startWebUI();
+  // startServer (NOT startWebUI) loads the saved config from disk and
+  // auto-starts the bridge when tokens + printers are already configured. Using
+  // startWebUI here meant every launch began with an empty in-memory config —
+  // the user had to re-login and re-scan each time and the bridge never
+  // auto-resumed, so cameras stayed dark until manual setup.
+  await startServer();
 
   createWindow();
   createTray();
@@ -88,6 +92,13 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   // Keep running in tray on all platforms
+});
+
+// Tear the bridge down cleanly on quit so streaming/connecting ffmpeg children
+// are killed instead of orphaned — an orphan keeps holding an RTSP printer's
+// limited connection slot, so the camera fails to reconnect on next launch.
+app.on("before-quit", () => {
+  try { stopBridge(); } catch {}
 });
 
 app.on("activate", () => {
