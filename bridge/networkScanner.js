@@ -61,16 +61,26 @@ function probePort(ip, port) {
 }
 
 /**
- * Probe both camera ports on an IP.
- * Resolves { ip, jpeg, rtsp } or null when neither port is open.
+ * Probe an IP's camera ports. Resolves { ip, jpeg, rtsp } or null when neither
+ * port is open.
+ *
+ * Probes port 6000 (JPEG) FIRST and short-circuits when it's open — JPEG is the
+ * preferred protocol when both are available, so there's no need to also open a
+ * second socket to 322. This keeps at most ~1 socket per in-flight probeIp
+ * (≈BATCH_SIZE concurrent), instead of 2×. The concurrent dual-probe version
+ * doubled the socket fleet to ~100/batch, which on a packaged Electron app —
+ * running under launchd's low RLIMIT_NOFILE (256), NOT a shell's raised limit —
+ * crossed the fd ceiling. connect() then failed EMFILE and probePort swallowed
+ * it as resolve(false): a silent false-negative that could drop even a healthy
+ * A1 from the scan. Sequential-with-short-circuit restores the old scanner's
+ * fd footprint exactly.
  */
 async function probeIp(ip) {
-  const [jpeg, rtsp] = await Promise.all([
-    probePort(ip, CAMERA_PORT),
-    probePort(ip, RTSP_PORT),
-  ]);
-  if (!jpeg && !rtsp) return null;
-  return { ip, jpeg, rtsp };
+  const jpeg = await probePort(ip, CAMERA_PORT);
+  if (jpeg) return { ip, jpeg: true, rtsp: false };
+  const rtsp = await probePort(ip, RTSP_PORT);
+  if (!rtsp) return null;
+  return { ip, jpeg: false, rtsp: true };
 }
 
 /**

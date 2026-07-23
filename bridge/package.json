@@ -1,6 +1,6 @@
 {
   "name": "bambubridge",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "BambuBridge — relay your Bambu Lab printer cameras to the cloud",
   "author": {
     "name": "DEGEN TECH SAS",

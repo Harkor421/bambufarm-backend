@@ -1,6 +1,17 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, shell } = require("electron");
 const path = require("path");
 
+// Crash guards — keep the tray app alive through stray async faults instead of
+// silently dying. A single unhandled error (e.g. an EMFILE from a burst of scan
+// sockets, or a socket 'error' with no listener) would otherwise take down the
+// whole bridge, killing camera streaming with no visible cause. Log and survive.
+process.on("uncaughtException", (err) => {
+  console.error("[BRIDGE] uncaughtException:", err && (err.stack || err.message || err));
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[BRIDGE] unhandledRejection:", reason && (reason.stack || reason.message || reason));
+});
+
 // Start the bridge server
 const { startWebUI } = require("./index");
 
