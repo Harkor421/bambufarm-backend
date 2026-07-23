@@ -227,6 +227,21 @@ async function scanAndMatch(cloudDevices, onProgress) {
   }
 
   const prefix = localIp.split(".").slice(0, 3).join(".");
+  // Log the chosen interface + every non-internal IPv4 candidate. getLocalIp
+  // picks the first non-internal address (only 100.x is skipped), so on a
+  // machine with a VPN / Docker / VM / Internet-Sharing adapter the scan can
+  // silently target the wrong /24 and find nothing. Surfacing the candidates
+  // makes a wrong-subnet scan diagnosable from the logs.
+  try {
+    const cands = [];
+    const ifaces = os.networkInterfaces();
+    for (const nm of Object.keys(ifaces)) {
+      for (const i of ifaces[nm]) {
+        if (i.family === "IPv4" && !i.internal) cands.push(`${nm}=${i.address}`);
+      }
+    }
+    console.log(`[Scan] Scanning ${prefix}.0/24 (chose ${localIp}); interfaces: ${cands.join(", ")}`);
+  } catch {}
   onProgress({ type: "status", message: `Scanning ${prefix}.0/24...`, progress: 0 });
 
   // Build IP list

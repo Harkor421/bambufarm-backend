@@ -195,6 +195,14 @@ function startCamera(printer) {
   // Printers matched by older bridge versions have no protocol field → jpeg.
   const createStream = printer.protocol === "rtsp" ? createRtspCameraStream : createCameraStream;
 
+  // Reserve the slot with a placeholder BEFORE createStream. If construction
+  // emits an error synchronously (e.g. an EMFILE from tls.connect), its
+  // onStateChange runs activeStreams.delete first; installing the real stream
+  // afterward would pin a dead stream and block the backoff retry. Only install
+  // if the placeholder is still present.
+  const placeholder = { stop() {} };
+  activeStreams.set(printer.devId, placeholder);
+
   const stream = createStream({
     ip: printer.ip,
     accessCode: printer.accessCode,
@@ -242,7 +250,13 @@ function startCamera(printer) {
     },
   });
 
-  activeStreams.set(printer.devId, stream);
+  if (activeStreams.get(printer.devId) === placeholder) {
+    activeStreams.set(printer.devId, stream);
+  } else {
+    // A synchronous error already cleared the slot and scheduled a retry — drop
+    // this now-dead stream instead of pinning it.
+    try { stream.stop(); } catch {}
+  }
 }
 
 function stopCamera(devId) {
@@ -314,8 +328,15 @@ function handleDemandUpdate(printerIds) {
     console.log(`[Bridge] Demand: ${printerIds.length ? printerIds.join(", ") : "(none)"}`);
   }
 
+  // Reassign BEFORE the stop loop so recordFailure's demandedPrinters.has()
+  // check is already false for a printer we're un-demanding — a synchronous
+  // 'disconnected' emitted during stopCamera teardown then can't schedule a
+  // spurious reconnect. Both loops key off the captured old set.
+  const oldDemand = demandedPrinters;
+  demandedPrinters = newDemand;
+
   for (const id of newDemand) {
-    if (!demandedPrinters.has(id)) {
+    if (!oldDemand.has(id)) {
       // If an IP camera is bound to this printer, prefer it over the Bambu cam.
       // The bound camera relays frames using the printer's devId, so the app
       // sees them through the existing pipeline with no protocol changes.
@@ -328,14 +349,13 @@ function handleDemandUpdate(printerIds) {
       }
     }
   }
-  for (const id of demandedPrinters) {
+  for (const id of oldDemand) {
     if (!newDemand.has(id)) {
       stopCamera(id);
       const ipCam = findCameraBoundTo(id);
       if (ipCam) stopIpCamera(ipCam.id);
     }
   }
-  demandedPrinters = newDemand;
 }
 
 // ─── Bridge start/stop ───────────────────────────────────
@@ -710,8 +730,9 @@ function render() {
   if (S.printers && S.printers.length > 0) {
     html += '<div style="margin-top:16px">';
     for (const p of S.printers) {
-      const sc = p.streamState === 'connected' ? 'dot-green' : p.streamState === 'connecting' ? 'dot-yellow' : p.streamState === 'error' || p.streamState === 'authFailed' ? 'dot-red' : 'dot-gray';
-      const stateLabel = p.streamState === 'connected' ? (p.demanded ? 'Streaming' : 'Connected') : p.streamState === 'connecting' ? 'Connecting...' : p.streamState === 'error' ? 'Error' : p.streamState === 'authFailed' ? 'Auth failed' : 'Idle';
+      const live = p.streamState === 'connected' || p.streamState === 'streaming';
+      const sc = live ? 'dot-green' : p.streamState === 'connecting' ? 'dot-yellow' : p.streamState === 'error' || p.streamState === 'authFailed' ? 'dot-red' : 'dot-gray';
+      const stateLabel = live ? (p.demanded ? 'Streaming' : 'Connected') : p.streamState === 'connecting' ? 'Connecting...' : p.streamState === 'error' ? 'Error' : p.streamState === 'authFailed' ? 'Auth failed' : 'Idle';
       html += '<div class="printer">' +
         '<div class="printer-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#26FF9A" stroke-width="1.5" stroke-linecap="round"><rect x="6" y="2" width="12" height="8" rx="1"/><rect x="4" y="10" width="16" height="10" rx="1"/><line x1="8" y1="22" x2="8" y2="20"/><line x1="16" y1="22" x2="16" y2="20"/></svg></div>' +
         '<div class="printer-info">' +
