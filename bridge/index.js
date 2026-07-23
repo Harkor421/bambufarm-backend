@@ -11,8 +11,8 @@
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
-const os = require("os");
 const bambuCloud = require("./bambuCloud");
+const { defaultConfig, loadConfig, saveConfig } = require("./config");
 const { scanAndMatch, getLocalIp } = require("./networkScanner");
 const { createCameraStream } = require("./cameraStream");
 const { createRtspCameraStream } = require("./rtspCameraStream");
@@ -32,25 +32,11 @@ const crypto = require("crypto");
 
 const UI_PORT = 8095;
 
-// Store config in user's home directory so it works when packaged with pkg
-// Migrate old config directory if it exists
-const OLD_CONFIG_DIR = path.join(os.homedir(), ".bambufarm-bridge");
-const CONFIG_DIR = path.join(os.homedir(), ".bambubridge");
-if (!fs.existsSync(CONFIG_DIR) && fs.existsSync(OLD_CONFIG_DIR)) {
-  try { fs.renameSync(OLD_CONFIG_DIR, CONFIG_DIR); } catch {}
-}
-if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
-const CONFIG_PATH = path.join(CONFIG_DIR, "bridge.config.json");
-
 // ─── State ───────────────────────────────────────────────
 
 const DEFAULT_SERVER_URL = "wss://bambufarm-api-production.up.railway.app/ws/bridge";
 
-let config = {
-  bambuTokens: null, // { accessToken, refreshToken, expiresAt }
-  printers: [],      // [{ devId, name, ip, accessCode }]
-  cameras: [],       // [{ id, name, brand?, model?, ip?, snapshotUrl, username?, password?, boundPrinterId?, addedAt }]
-};
+let config = defaultConfig();
 
 let bridgeRunning = false;
 let wsClient = null;
@@ -67,21 +53,7 @@ let cameraScanState = null;        // { running, progress, found } or null
 const cameraStreams = new Map();   // cameraId → { stop }
 const cameraStreamStates = new Map(); // cameraId → state string
 
-// ─── Config persistence ──────────────────────────────────
-
-function loadConfig() {
-  try {
-    if (fs.existsSync(CONFIG_PATH)) {
-      config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")) };
-    }
-  } catch {}
-}
-
-function saveConfig() {
-  try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-  } catch {}
-}
+// Config persistence (loadConfig / saveConfig / paths) lives in ./config.js.
 
 // ─── Bambu Cloud Auth ────────────────────────────────────
 
@@ -92,7 +64,7 @@ async function getAccessToken() {
   if (Date.now() > config.bambuTokens.expiresAt - 60000) {
     try {
       config.bambuTokens = await bambuCloud.refreshToken(config.bambuTokens.refreshToken);
-      saveConfig();
+      saveConfig(config);
       console.log("[Auth] Token refreshed");
     } catch (err) {
       // Refresh is BEST-EFFORT. Bambu is known to 401 the refresh endpoint even
@@ -128,7 +100,7 @@ async function discoverPrinters() {
   });
 
   config.printers = matched;
-  saveConfig();
+  saveConfig(config);
   scanProgress = null;
 
   // If this was a re-scan while the bridge is live, rebuild it from the new
@@ -460,7 +432,7 @@ function startWebUI() {
           }
           config.bambuTokens = result.tokens;
           loginPending = null;
-          saveConfig();
+          saveConfig(config);
           return sendJson(res, { ok: true });
         } catch (err) {
           return sendJson(res, { ok: false, error: err.message || "Login failed" }, 400);
@@ -472,7 +444,7 @@ function startWebUI() {
         try {
           config.bambuTokens = await bambuCloud.verifyCode(email, code);
           loginPending = null;
-          saveConfig();
+          saveConfig(config);
           return sendJson(res, { ok: true });
         } catch (err) {
           return sendJson(res, { ok: false, error: err.message || "Verification failed" }, 400);
@@ -484,7 +456,7 @@ function startWebUI() {
         config.printers = [];
         loginPending = null;
         stopBridge();
-        saveConfig();
+        saveConfig(config);
         return sendJson(res, { ok: true });
       }
 
@@ -557,7 +529,7 @@ function startWebUI() {
           addedAt: new Date().toISOString(),
         };
         config.cameras.push(cam);
-        saveConfig();
+        saveConfig(config);
         return sendJson(res, { ok: true, camera: { ...cam, password: cam.password ? "***" : undefined } });
       }
 
@@ -593,7 +565,7 @@ function startWebUI() {
             }
           }
           cam.boundPrinterId = printerId;
-          saveConfig();
+          saveConfig(config);
           // If that printer is currently being demanded, swap from Bambu cam to IP cam now
           if (demandedPrinters.has(printerId)) {
             stopCamera(printerId);
@@ -605,7 +577,7 @@ function startWebUI() {
         if (req.method === "POST" && action === "unbind") {
           const printerId = cam.boundPrinterId;
           cam.boundPrinterId = null;
-          saveConfig();
+          saveConfig(config);
           stopIpCamera(cam.id);
           // If printer is still demanded, fall back to its Bambu camera (if any)
           if (printerId && demandedPrinters.has(printerId)) {
@@ -619,7 +591,7 @@ function startWebUI() {
           stopIpCamera(cam.id);
           const printerId = cam.boundPrinterId;
           config.cameras = config.cameras.filter((c) => c.id !== cameraId);
-          saveConfig();
+          saveConfig(config);
           if (printerId && demandedPrinters.has(printerId)) {
             const printer = config.printers.find((p) => p.devId === printerId);
             if (printer) startCamera(printer);
@@ -657,7 +629,7 @@ function startWebUI() {
  * server is listening. Used by both standalone mode and Electron.
  */
 async function startServer() {
-  loadConfig();
+  config = loadConfig();
   const server = await startWebUI();
 
   // Auto-start bridge if already configured
