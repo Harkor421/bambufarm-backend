@@ -450,15 +450,23 @@ class PrinterMqttConnection {
     // sends multiple raw messages per second). State changes (gcode_state)
     // always push immediately for instant UI feedback.
     try {
-      if (!this._lastStatePush) this._lastStatePush = new Map();
-      const now = Date.now();
-      const lastPush = this._lastStatePush.get(devId) || 0;
-      const stateChanged = p.gcode_state && p.gcode_state !== prev.gcode_state;
-      if (stateChanged || now - lastPush >= 2000) {
-        this._lastStatePush.set(devId, now);
-        const wsManager = require("./wsManager");
-        const { normalizeMqttState } = require("../utils/normalizeMqttState");
-        wsManager.broadcastMqttState(this.bambuUid, devId, normalizeMqttState(merged));
+      // Skip the whole normalize+broadcast when no app client is watching this
+      // account. broadcastMqttState already no-ops on an empty subscriber set,
+      // so this is behavior-identical — it just avoids the per-report
+      // normalizeMqttState allocation (thousands/sec fleet-wide) for unwatched
+      // printers. The push + Live Activity paths above are untouched. (require
+      // stays lazy — the module has a circular edge with wsManager.)
+      const wsManager = require("./wsManager");
+      if (wsManager.hasAppClients(this.bambuUid)) {
+        if (!this._lastStatePush) this._lastStatePush = new Map();
+        const now = Date.now();
+        const lastPush = this._lastStatePush.get(devId) || 0;
+        const stateChanged = p.gcode_state && p.gcode_state !== prev.gcode_state;
+        if (stateChanged || now - lastPush >= 2000) {
+          this._lastStatePush.set(devId, now);
+          const { normalizeMqttState } = require("../utils/normalizeMqttState");
+          wsManager.broadcastMqttState(this.bambuUid, devId, normalizeMqttState(merged));
+        }
       }
     } catch (err) {
       // Don't let a broadcast failure poison the MQTT state machine — but
@@ -503,6 +511,14 @@ class PrinterMqttConnection {
   _pushallAll() {
     if (!this.client) return;
     for (const devId of this.printerIds) {
+      // Skip printers already streaming reports — their state is fresh, so the
+      // full-state pushall (a large JSON round-trip) is wasted CPU + egress.
+      // Idle printers (only the pushall response arrives, always >30s stale)
+      // still get pushalled every cycle; a printer that stops streaming ages
+      // past 30s within one cycle and auto-resumes pushall, so offline
+      // detection stays fed. 30s must stay well under PUSHALL_INTERVAL (180s).
+      const last = this.lastReportAt.get(devId) || 0;
+      if (Date.now() - last < 30000) continue;
       this.sequenceId++;
       this.client.publish(
         `device/${devId}/request`,

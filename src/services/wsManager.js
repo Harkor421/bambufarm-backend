@@ -754,6 +754,14 @@ class WsManager {
    * @param {object} normalizedState - The same shape as `/api/printer/mqtt-state`
    *   returns per-printer (gcodeState, percent, ams, etc.)
    */
+  // O(1) check for whether any app client is connected for this account. Lets
+  // the MQTT report path skip the per-report normalize+broadcast work entirely
+  // when nobody is watching (broadcastMqttState would no-op anyway).
+  hasAppClients(bambuUid) {
+    const clients = this.appClients.get(String(bambuUid));
+    return !!clients && clients.size > 0;
+  }
+
   broadcastMqttState(bambuUid, devId, normalizedState) {
     const clients = this.appClients.get(String(bambuUid));
     if (!clients || clients.size === 0) return;
