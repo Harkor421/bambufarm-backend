@@ -91,6 +91,11 @@ router.post("/register", async (req, res) => {
       bambu_access_token: accessToken,
       bambu_refresh_token: refreshToken,
       bambu_token_expires_at: expiresAt,
+      // LOAD-BEARING for MQTT auth-suspension recovery: the new bambu_access_token
+      // lets the 120s scan detect a token change and rebuild a dormant (dead-token)
+      // connection, and fail_count:0 re-includes a fail_count>=5 account in the
+      // scan/poller. Removing either permanently strands a re-logged-in user whose
+      // connection was auth-suspended. See mqttPrinterService auth-retry logic.
       fail_count: 0,
     };
     if (bambuUid) update.bambu_uid = bambuUid;

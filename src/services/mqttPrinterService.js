@@ -25,6 +25,13 @@ const { EVENTS } = require("./eventBus");
 const config = require("../config");
 const BAMBU_API = config.bambu.apiBase;
 
+// How often the 120s scan re-probes an auth-suspended connection whose DB token
+// hasn't changed. This is the mass-suspension safety valve: if Bambu code-5s the
+// whole fleet at once, every connection suspends, but each re-probes at most
+// once per window, so the fleet self-heals within ~15 min of Bambu recovering
+// instead of staying dark until a process restart.
+const AUTH_RETRY_INTERVAL = 15 * 60 * 1000;
+
 // ── Service manager ────────────────────────────────────
 
 class MqttPrinterService {
@@ -157,7 +164,10 @@ class MqttPrinterService {
 
       // Collect already-connected UIDs
       for (const [userId, conn] of this.connections) {
-        if (conn.bambuUid) connectedBambuUids.set(conn.bambuUid, userId);
+        // Skip auth-suspended (dead-token) conns: their uid must NOT block a
+        // SIBLING user record that just re-logged in with a fresh token, or the
+        // early-skip below would fire and that record would never reconnect.
+        if (conn.bambuUid && !conn.authSuspended) connectedBambuUids.set(conn.bambuUid, userId);
       }
 
       let userIndex = 0;
@@ -167,6 +177,18 @@ class MqttPrinterService {
         if (this.connections.has(id)) {
           const existing = this.connections.get(id);
           if (existing.connected && existing.socket && !existing.socket.destroyed) {
+            continue;
+          }
+          // Auth-suspended dead token: stay dormant. Rebuild ONLY when the DB
+          // token changed (a real re-login → recover within one scan tick) OR
+          // the retry window elapsed (the mass-suspension safety valve). Without
+          // this the scan would tear down + rebuild the dead conn every 120s,
+          // re-triggering the CONNACK churn we just suppressed.
+          if (
+            existing.authSuspended &&
+            existing.suspendedToken === user.bambu_access_token &&
+            Date.now() - existing.suspendedAt < AUTH_RETRY_INTERVAL
+          ) {
             continue;
           }
           log.debug(`[MQTT] User ${id} connection is dead, reconnecting...`);

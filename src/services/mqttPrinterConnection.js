@@ -16,6 +16,10 @@ const MQTT_HOST = config.bambu.mqttHost;
 const MQTT_PORT = config.bambu.mqttPort;
 const PUSHALL_INTERVAL = config.bambu.pushallInterval;
 const RECONNECT_DELAY = config.bambu.reconnectDelay;
+// Consecutive CONNACK auth rejections (code 4/5/135) before we suspend a
+// connection's reconnect loop — a dead Bambu token that keeps getting refused
+// by the broker otherwise reconnects every 10-40s forever, producing nothing.
+const AUTH_SUSPEND_THRESHOLD = 3;
 const BAMBU_API = config.bambu.apiBase;
 // How often a live connection re-fetches the account's bound-device list, so
 // printers that were offline when the connection was first built get picked
@@ -79,6 +83,16 @@ class PrinterMqttConnection {
     // would otherwise trigger a synchronized TLS-handshake storm every
     // RECONNECT_DELAY; the random spread flattens it.
     this.reconnectPeriod = RECONNECT_DELAY + Math.floor(Math.random() * 30000);
+
+    // Dead-Bambu-token auth-reject circuit breaker. Counts CONSECUTIVE CONNACK
+    // auth refusals only; any successful "connect" resets it, so a valid token
+    // is never suspended. After AUTH_SUSPEND_THRESHOLD we end mqtt.js's
+    // reconnect loop and mark authSuspended so the service scan leaves us
+    // dormant until the DB token changes (re-login) or a retry window elapses.
+    this.authFailCount = 0;
+    this.authSuspended = false;
+    this.suspendedToken = null; // the exact bambu_access_token the broker refused
+    this.suspendedAt = 0;
   }
 
   connect() {
@@ -104,6 +118,12 @@ class PrinterMqttConnection {
       this.client.setMaxListeners(50);
 
       this.client.on("connect", () => {
+        // A successful connect clears any auth-suspension bookkeeping — this is
+        // what guarantees a valid token is never left flagged/dormant.
+        this.authFailCount = 0;
+        this.authSuspended = false;
+        this.suspendedToken = null;
+        this.suspendedAt = 0;
         this.connected = true;
         this.connectedAt = Date.now();
         this.socket = this.client.stream; // for dead-connection check
@@ -128,10 +148,43 @@ class PrinterMqttConnection {
       });
 
       this.client.on("error", (err) => {
+        // Only a CONNACK auth rejection carries a NUMERIC reason code (4 = bad
+        // user/pass, 5 = not authorized, 135 = MQTT5 not authorized). Network
+        // errors (ECONNRESET/ETIMEDOUT) carry STRING errno codes and timeouts
+        // carry none — those are transient and MUST keep retrying, so they never
+        // count here. Never match on err.message.
+        const isAuthReject =
+          typeof err.code === "number" && (err.code === 5 || err.code === 4 || err.code === 135);
+        if (isAuthReject) {
+          this.authFailCount++;
+          if (this.authFailCount >= AUTH_SUSPEND_THRESHOLD) {
+            this.authSuspended = true;
+            this.suspendedToken = this.accessToken;
+            this.suspendedAt = Date.now();
+            log.warn(
+              `[MQTT] user ${this.userId} auth-SUSPENDED after ${this.authFailCount} CONNACK rejections (code ${err.code}); dormant until re-login or the scan retry window`
+            );
+            this._stopTimers();
+            // client.end(true) sets disconnecting=true; mqtt.js guards its
+            // reconnect on !disconnecting, so this durably halts the 10-40s
+            // loop (the same mechanism stop() uses). We do NOT set this.stopped
+            // — connect() early-returns on that — so the scan can still rebuild
+            // on re-login via the separate authSuspended flag.
+            try { this.client.end(true); } catch {}
+          } else {
+            log.debug(
+              `[MQTT] auth reject ${this.authFailCount}/${AUTH_SUSPEND_THRESHOLD} for user ${this.userId} (CONNACK ${err.code})`
+            );
+          }
+          return;
+        }
         log.error(`[MQTT] Error for user ${this.userId}: ${err.message}`);
       });
 
       this.client.on("close", () => {
+        // A deliberate auth-suspend already tore down timers + ended the client;
+        // don't log the misleading "will auto-reconnect" or re-stop timers.
+        if (this.authSuspended) { this.connected = false; return; }
         this.connected = false;
         this._stopTimers();
         if (!this.stopped) {
