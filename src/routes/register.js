@@ -1,5 +1,6 @@
 const { Router } = require("express");
 const User = require("../db/models/User");
+const { invalidateUserToken } = require("../services/userTokenCache");
 const log = require("../utils/logger");
 
 const router = Router();
@@ -109,6 +110,9 @@ router.post("/register", async (req, res) => {
       update,
       { upsert: true, new: true }
     );
+    // The token->user (and bambu_uid) mapping just changed — drop any cached
+    // entry so the hot read path can't route to a stale account.
+    invalidateUserToken(expoPushToken);
 
     log.info(`[REGISTER] ${expoPushToken.slice(0, 30)}...`);
     res.json({ ok: true });
@@ -142,6 +146,7 @@ router.post("/unregister", async (req, res) => {
     } else {
       log.info(`[UNREGISTER] ${expoPushToken.slice(0, 30)}... (not found)`);
     }
+    invalidateUserToken(expoPushToken);
     res.json({ ok: true });
   } catch (err) {
     log.error(`[UNREGISTER] Error: ${err.message}`);
@@ -168,6 +173,7 @@ router.post("/activity-token", async (req, res) => {
       { expo_push_token: expoPushToken },
       { [`la_activity_tokens.${printerId}`]: activityUpdateToken }
     );
+    invalidateUserToken(expoPushToken);
 
     log.info(`[ACTIVITY-TOKEN] Stored token for printer ${printerId} (${activityUpdateToken.slice(0, 16)}...)`);
     res.json({ ok: true });
@@ -193,6 +199,7 @@ router.post("/push-to-start-token", async (req, res) => {
       { expo_push_token: expoPushToken },
       { la_push_to_start_token: laPushToStartToken }
     );
+    invalidateUserToken(expoPushToken);
 
     log.info(`[PUSH-TO-START] Stored token (${laPushToStartToken.slice(0, 16)}...)`);
     res.json({ ok: true });

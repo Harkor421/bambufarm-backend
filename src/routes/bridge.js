@@ -1,7 +1,7 @@
 const { Router } = require("express");
 const wsManager = require("../services/wsManager");
 const PrinterState = require("../db/models/PrinterState");
-const User = require("../db/models/User");
+const { getUserByPushToken } = require("../services/userTokenCache");
 const log = require("../utils/logger");
 
 const router = Router();
@@ -23,7 +23,7 @@ router.get("/bridge/status", async (req, res) => {
     return res.status(401).json({ ok: false, error: "Missing expoPushToken" });
   }
 
-  const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+  const user = await getUserByPushToken(expoPushToken);
   if (!user || String(user.bambu_uid) !== String(userId)) {
     return res.status(403).json({ ok: false, error: "Unauthorized" });
   }
@@ -47,7 +47,7 @@ router.get("/printer/frame/:uid/:printerId", async (req, res) => {
     const { expoPushToken } = req.query;
     if (!expoPushToken) return res.status(401).end();
 
-    const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+    const user = await getUserByPushToken(expoPushToken);
     if (!user || String(user.bambu_uid) !== String(uid)) {
       return res.status(403).end();
     }
@@ -74,7 +74,7 @@ router.get("/printer-states", async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+    const user = await getUserByPushToken(expoPushToken);
     if (!user) {
       return res.status(404).json({ ok: false, error: "User not found" });
     }

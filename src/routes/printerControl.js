@@ -1,7 +1,7 @@
 const { Router } = require("express");
 const mqttService = require("../services/mqttPrinterService");
 const wsManager = require("../services/wsManager");
-const User = require("../db/models/User");
+const { getUserByPushToken } = require("../services/userTokenCache");
 const log = require("../utils/logger");
 
 const router = Router();
@@ -23,7 +23,7 @@ async function resolveUser(req, res) {
     return null;
   }
 
-  const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+  const user = await getUserByPushToken(expoPushToken);
   if (!user) {
     res.status(404).json({ ok: false, error: "User not found" });
     return null;
@@ -167,7 +167,7 @@ router.get("/printer/mqtt-state", async (req, res) => {
       return res.status(401).json({ ok: false, error: "Missing expoPushToken" });
     }
 
-    const user = await User.findOne({ expo_push_token: expoPushToken }).lean();
+    const user = await getUserByPushToken(expoPushToken);
     if (!user) {
       // Unknown token — return empty. NEVER fall back to other users' states.
       return res.json({ ok: true, printers: {} });
