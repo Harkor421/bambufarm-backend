@@ -35,6 +35,19 @@ const BIND_REFRESH_INTERVAL = 15 * 60 * 1000;
 const OFFLINE_SWEEP_INTERVAL = 60 * 1000;
 const OFFLINE_THRESHOLD = PUSHALL_INTERVAL * 2 + 60 * 1000;
 
+// Known-heavy Bambu `print` fields that no server route, WS push, notification /
+// Live-Activity path, or the iOS app ever reads (verified by grep across src +
+// app). All are TOP-LEVEL, so the merge only ever overwrite/carry-forwards them
+// — none is a merge base (only `ams` is recursively walked). Dropping them from
+// the cached per-printer state trims Node-heap RAM + GC churn at ~2,300
+// connections. NEVER add `stg_cur` (returned as `stage`), `ams`, `hms`,
+// `lights_report`, `vt_tray`, or any normalizeMqttState scalar here.
+const PRUNE_TOP_LEVEL = [
+  "stg", "ipcam", "xcam", "net", "upload", "online", "hw_switch_state",
+  "home_flag", "mc_print_stage", "cooling_fan_speed", "big_fan1_speed",
+  "big_fan2_speed", "heatbreak_fan_speed", "fan_gear",
+];
+
 class PrinterMqttConnection {
   constructor({ userId, bambuUid, accessToken, printerIds, onStateChange, onProgressUpdate, onOffline }) {
     this.userId = userId;
@@ -420,6 +433,10 @@ class PrinterMqttConnection {
         merged[key] = p[key];
       }
     }
+    // Drop known-heavy unused top-level fields before caching (RAM). Safe: these
+    // are never read and never a merge base; if a report re-includes one it's
+    // re-dropped next cycle. `prev` is already pruned, so nothing reaccumulates.
+    for (const k of PRUNE_TOP_LEVEL) delete merged[k];
     this.printerStates.set(devId, merged);
 
     // Detect gcode_state changes
