@@ -1,207 +1,111 @@
-# BambuFarm Server
+<div align="center">
 
-[![CI](https://github.com/Harkor421/bambufarm-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Harkor421/bambufarm-backend/actions/workflows/ci.yml)
+<img src="bridge/icon.png" alt="bambufarm-backend" width="120" />
 
-Node.js backend for the [BambuFarm](https://github.com/Harkor421/BambuFarm) iOS app. Subscribes to Bambu Cloud MQTT for real-time printer state, dispatches push notifications + Live Activity updates via APNs, relays camera streams from per-user bridges, and serves a small REST API for the app.
+# bambufarm-backend
 
-**Production**: deployed on Railway, ~1,600 active users, ~470 concurrent MQTT connections.
+### El servidor que mantiene viva una granja de impresoras Bambu Lab
+
+![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black) ![HTML5](https://img.shields.io/badge/HTML5-E34F26?style=for-the-badge&logo=html5&logoColor=white) ![Node.js](https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white) ![Expo](https://img.shields.io/badge/Expo-000020?style=for-the-badge&logo=expo&logoColor=white) ![Express](https://img.shields.io/badge/Express-000000?style=for-the-badge&logo=express&logoColor=white) ![WebSocket](https://img.shields.io/badge/WebSocket-1F2937?style=for-the-badge&logo=socketdotio&logoColor=white) ![Mongoose](https://img.shields.io/badge/Mongoose-880000?style=for-the-badge&logo=mongodb&logoColor=white) ![Claude](https://img.shields.io/badge/Claude-D97757?style=for-the-badge&logo=anthropic&logoColor=white) ![JWT](https://img.shields.io/badge/JWT-000000?style=for-the-badge&logo=jsonwebtokens&logoColor=white) ![MQTT](https://img.shields.io/badge/MQTT-660066?style=for-the-badge&logo=mqtt&logoColor=white) ![Jest](https://img.shields.io/badge/Jest-C21325?style=for-the-badge&logo=jest&logoColor=white) ![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white)
+
+[**📦 Repositorio**](https://github.com/Harkor421/bambufarm-backend)
+
+</div>
 
 ---
 
-## Quick start
+## 📖 Sobre el proyecto
+
+Backend Node.js de la app iOS [BambuFarm](https://github.com/Harkor421/BambuFarm). Se suscribe al MQTT de Bambu Cloud para el estado en tiempo real de las impresoras, despacha push notifications y actualizaciones de Live Activity vía APNs, y retransmite las cámaras a través de un bridge por usuario.
+
+## ✨ Qué hace
+
+- Suscripción MQTT a Bambu Cloud para estado en vivo de cada impresora
+- Push notifications y Live Activities por APNs
+- Bridge de escritorio (Electron) que descubre impresoras y cámaras en la LAN (ONVIF/RTSP)
+- Análisis de impresión con Claude sobre snapshots de la cámara
+- Auth con JWT, MongoDB, rate limiting, CI en GitHub Actions y tests con cobertura
+
+## 🧰 Stack
+
+| | |
+|---|---|
+| **Lenguajes y runtime** | ![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black) ![HTML5](https://img.shields.io/badge/HTML5-E34F26?style=for-the-badge&logo=html5&logoColor=white) ![Node.js](https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white) |
+| **Móvil y escritorio** | ![Expo](https://img.shields.io/badge/Expo-000020?style=for-the-badge&logo=expo&logoColor=white) |
+| **Backend** | ![Express](https://img.shields.io/badge/Express-000000?style=for-the-badge&logo=express&logoColor=white) ![WebSocket](https://img.shields.io/badge/WebSocket-1F2937?style=for-the-badge&logo=socketdotio&logoColor=white) ![JWT](https://img.shields.io/badge/JWT-000000?style=for-the-badge&logo=jsonwebtokens&logoColor=white) |
+| **Datos** | ![Mongoose](https://img.shields.io/badge/Mongoose-880000?style=for-the-badge&logo=mongodb&logoColor=white) |
+| **IA** | ![Claude](https://img.shields.io/badge/Claude-D97757?style=for-the-badge&logo=anthropic&logoColor=white) |
+| **Servicios e integraciones** | ![MQTT](https://img.shields.io/badge/MQTT-660066?style=for-the-badge&logo=mqtt&logoColor=white) |
+| **Calidad** | ![Jest](https://img.shields.io/badge/Jest-C21325?style=for-the-badge&logo=jest&logoColor=white) |
+| **Infraestructura** | ![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white) |
+
+## 📂 Estructura
+
+```
+src/__tests__                  # Tests
+src/db                         # Acceso a base de datos
+src/middleware                 # Middleware
+src/routes                     # Definición de rutas
+src/services                   # Servicios e integraciones
+src/utils                      # Funciones auxiliares
+bridge/.DS_Store
+bridge/.gitignore
+bridge/__tests__
+ios/bambufarmserver            # Proyecto nativo de iOS
+ios/bambufarmserver.xcodeproj  # Proyecto nativo de iOS
+```
+
+## 🚀 Empezar
 
 ```bash
-# 1. Install
+git clone https://github.com/Harkor421/bambufarm-backend.git
+cd bambufarm-backend
 npm install
-
-# 2. Copy env template + fill in your values
-cp .env.example .env
-
-# 3. Run with watch mode
 npm run dev
 ```
 
-Requires Node ≥ 20 and a reachable MongoDB instance. Set `MONGO_URI=mongodb://localhost:27017/bambufarm` for local dev.
+## ⚙️ Variables de entorno
 
----
+Copia `.env.example` a `.env` y completa los valores:
 
-## Architecture
-
-```
-                  ┌──────────────────────────┐
-  Bambu Cloud ───►│ mqttPrinterService       │── state changes ──┐
-  MQTT (TLS)      │  (one TCP per user × 1)  │                   │
-                  └──────────────────────────┘                   ▼
-                                                       ┌─────────────────┐
-  iOS apps  ◄──── push notifications ──────────────────│ pushSender      │
-  (1.6k)    ◄──── Live Activity updates ──────────────►│ apnsSender      │
-                                                       └─────────────────┘
-                  ┌──────────────────────────┐
-  iOS apps  ◄────►│ wsManager (WebSocket)    │◄──── camera frames ────┐
-                  │  /ws/app  /ws/bridge     │                        │
-                  └──────────────────────────┘                        │
-                                                       ┌─────────────────────┐
-  iOS apps  ◄──── REST GET /api/admin/...  ────────────│ Express routes      │
-            ──── REST POST /api/register ───────────►  │  (validated, auth'd)│
-                                                       └─────────────────────┘
-```
-
-### Code layout
-
-```
-src/
-├── index.js              Entry point — boot order: db → mqtt → ws → http
-├── app.js                Express app factory (route mounting, middleware)
-├── config.js             Centralized env-var reads + defaults
-├── routes/               HTTP handlers (one file per resource)
-│   ├── adminMetrics.js   Admin dashboard endpoints
-│   ├── register.js       Device registration, push token sync
-│   ├── printerControl.js Printer commands (pause/resume/stop/light)
-│   └── …
-├── services/             Long-lived processes
-│   ├── mqttPrinterService.js  Bambu MQTT client per user
-│   ├── apnsSender.js          APNs HTTP/2 client (Live Activities)
-│   ├── pushSender.js          Expo push client
-│   ├── wsManager.js           WebSocket server (camera relay)
-│   ├── tokenRefresh.js        Bambu OAuth refresh
-│   └── eventBus.js            In-process event emitter (decouples services)
-├── db/
-│   └── models/           Mongoose schemas (User, PrinterState, BridgeSession)
-├── middleware/           Express middleware (admin auth, rate-limit, …)
-├── utils/                Pure helpers (hmsErrors, normalizers, validators)
-└── __tests__/            Jest unit + integration tests (99+ tests)
-```
-
----
-
-## Routes
-
-| Route | Method | Auth | Purpose |
-|---|---|---|---|
-| `/api/health` | GET | none | Liveness check (uptime, MQTT counts) |
-| `/api/register` | POST | none | Register device, push token, activity tokens |
-| `/api/printer/control` | POST | api key | Pause / resume / stop a print |
-| `/api/printer/light` | POST | api key | Toggle chamber light |
-| `/api/admin/metrics/overview` | GET | admin | Dashboard summary |
-| `/api/admin/metrics/printers` | GET | admin | All printers + state |
-| `/api/admin/broadcast` | POST | admin | Send a push to all users |
-| `/ws/bridge` | WS | uid query | LAN bridge connection (camera publisher) |
-| `/ws/app` | WS | uid query | App connection (camera subscriber + MQTT pushes) |
-
-Full API contract: see route handlers — each file has top-of-file JSDoc with payload shapes.
-
----
-
-## MQTT flow
-
-1. On boot, `mqttPrinterService` opens one TLS TCP per registered user → `us.mqtt.bambulab.com:8883`
-2. Subscribes to `device/{dev_id}/report` for all printers owned by the user
-3. Sends a `pushall` every 60s as a heartbeat + full-state refresh
-4. Each incoming message is normalized → diff'd against last-known state → triggers events:
-
-| Transition | Action |
+| Variable | Ejemplo / valor por defecto |
 |---|---|
-| → RUNNING (from IDLE/FINISH/FAILED/PREPARE) | Push "started" + start Live Activity (push-to-start) |
-| RUNNING → PAUSE | Push "paused" + LA update (with HMS reason) |
-| PAUSE → RUNNING | Push "resumed" + LA update |
-| → FINISH/IDLE (from RUNNING/PAUSE/PREPARE) | Push "finished" / "cancelled" + end LA |
-| → FAILED (from RUNNING/PAUSE/PREPARE) | Push "failed" + end LA |
-| Any progress / temp / layer change | LA progress update (debounced) |
+| `MONGO_URI` | `mongodb://localhost:27017/bambufarm` |
+| `API_KEY` | `replace_me` |
+| `ADMIN_PASSWORD` | `replace_me` |
+| `APNS_KEY_ID` | `XXXXXXXXXX` |
+| `APNS_TEAM_ID` | `XXXXXXXXXX` |
+| `APNS_KEY_PATH` | `./data/AuthKey_XXXXXXXXXX.p8` |
+| `APNS_HOST` | `api.push.apple.com            # prod` |
+| `PORT` | `3000` |
+| `POLL_INTERVAL_MS` | `30000` |
+| `LOG_LEVEL` | `info` |
+| `NODE_ENV` | `development` |
 
-State changes also fan out via `eventBus` (`printer:stateChange`) so other services (admin metrics, training data capture) can react without coupling.
+## 📜 Scripts
 
----
-
-## Environment variables
-
-All env vars read in `src/config.js`. See [`.env.example`](./.env.example) for the canonical list with comments.
-
-### Required
-
-| Variable | Notes |
+| Comando | Qué hace |
 |---|---|
-| `MONGO_URI` | MongoDB connection string |
-| `API_KEY` | Shared key for app → server authenticated endpoints |
-| `ADMIN_PASSWORD` | Admin endpoint password (set via Railway env) |
-| `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY_CONTENTS` (or `APNS_KEY_PATH`) | APNs auth |
+| `npm run start` | Arranca la aplicación |
+| `npm run dev` | Servidor de desarrollo con recarga en caliente |
+| `npm run lint` | Revisa el estilo del código |
+| `npm run lint:fix` | Corrige automáticamente lo que puede |
+| `npm run format` | Formatea el código |
+| `npm run format:check` | Verifica el formato sin escribir |
+| `npm run test` | Ejecuta la suite de tests |
+| `npm run test:watch` | Tests en modo watch |
+| `npm run test:cov` | Tests con reporte de cobertura |
 
-### Optional
+## ☁️ Despliegue
 
-| Variable | Default | Notes |
-|---|---|---|
-| `PORT` | `3000` | HTTP port |
-| `APNS_HOST` | `api.push.apple.com` | Use `api.sandbox.push.apple.com` for dev builds |
-| `POLL_INTERVAL_MS` | `30000` | Token refresh / printer discovery cadence |
-| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
-| `NODE_ENV` | `development` | `production` enables stricter behavior |
-| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ENDPOINT` | — | Cloudflare R2 for training-data captures |
-| `TECNOPRINTS_UID`, `TECNOPRINTS_URL` | — | External broadcast integration |
-| `PUBLIC_CAMERA_UID` | — | Demo camera UID |
-| `VISION_ENABLED`, `VISION_INTERVAL_MS`, `VISION_TARGET_UID` | — | Print-vision experimental feature |
-| `ANTHROPIC_API_KEY` | — | (reserved) |
+- **Railway** (`railway.json` / `nixpacks.toml`)
+- **Procfile** (Heroku / Railway)
+- **EAS Build** (Expo)
 
 ---
 
-## Scripts
+<div align="center">
 
-| Command | What it does |
-|---|---|
-| `npm start` | Production server (no watch) |
-| `npm run dev` | `node --watch` (auto-reload) |
-| `npm test` | Jest — runs all `__tests__/` |
-| `npm test -- --watch` | Interactive |
-| `npm run lint` | ESLint |
-| `npm run postinstall` | Builds the (legacy) Bambu plugin shim if Linux |
+Hecho por [**Samir González**](https://github.com/Harkor421)
 
----
-
-## Tests
-
-99+ tests in `src/__tests__/` covering critical logic:
-- MQTT message parsing + state-change rules
-- APNs token utilities, sender retry logic
-- Input validation
-- Training data capture format
-
-```bash
-npm test
-```
-
-CI: `.github/workflows/ci.yml` runs `npm test` on every PR + push to `main`. A pre-push git hook (in the parent repo) ALSO runs server tests before allowing a push.
-
----
-
-## Deployment
-
-Auto-deploys to Railway on push to `main`.
-
-- **Builder**: Nixpacks (auto-detected; configured via `nixpacks.toml`)
-- **Start command**: `npm start`
-- **Health check**: `GET /api/health` — Railway uses this to gate traffic onto a new deploy
-- **Migrations**: Mongoose schemas auto-create on first connect; no migration step needed
-
-Manual deploy (rare):
-
-```bash
-railway up --detach
-```
-
-Rollback:
-
-```bash
-railway redeploy --previous
-```
-
----
-
-## Observability
-
-- **Logs**: structured via `src/utils/logger.js` — written to stdout, captured by Railway
-- **Metrics**: in-process counters at `GET /api/admin/metrics/overview` (admin auth)
-- **Errors**: caught + logged. No third-party error reporting service wired up yet (was considered, decided against for now to keep the dependency surface small)
-
----
-
-## License
-
-MIT — see [LICENSE](./LICENSE).
+</div>
