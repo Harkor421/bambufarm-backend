@@ -27,7 +27,14 @@ async function processUser(user) {
       await User.updateOne({ _id: user._id }, { fail_count: 0 });
     }
   } catch (err) {
-    if (err.response?.status !== 429) {
+    const status = err.response?.status;
+    // 401 = expired Bambu token that can't be refreshed (Bambu blocks refresh) —
+    // expected, the user must re-login, so log at debug, not error. 429 =
+    // rate-limited, skip. fail_count still climbs either way, so after 5 the
+    // user is excluded from polling.
+    if (status === 401) {
+      log.debug(`[POLL] User ${user._id} token expired (401) — needs re-login`);
+    } else if (status !== 429) {
       log.error(`[POLL] User ${user._id} error: ${err.message}`);
     }
     await User.updateOne({ _id: user._id }, { $inc: { fail_count: 1 } });

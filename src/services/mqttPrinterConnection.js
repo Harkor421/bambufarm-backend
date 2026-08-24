@@ -93,6 +93,10 @@ class PrinterMqttConnection {
     this.authSuspended = false;
     this.suspendedToken = null; // the exact bambu_access_token the broker refused
     this.suspendedAt = 0;
+    // Set once /user/bind returns 401 (expired REST token). A live connection
+    // never swaps its cached token, so re-hitting Bambu every 15 min is pure
+    // waste until the connection is recreated with a fresh token (re-login).
+    this.bindRefreshDisabled = false;
   }
 
   connect() {
@@ -124,6 +128,8 @@ class PrinterMqttConnection {
         this.authSuspended = false;
         this.suspendedToken = null;
         this.suspendedAt = 0;
+        // A successful connect proves the token is valid, so re-enable bind-refresh.
+        this.bindRefreshDisabled = false;
         this.connected = true;
         this.connectedAt = Date.now();
         this.socket = this.client.stream; // for dead-connection check
@@ -616,6 +622,9 @@ class PrinterMqttConnection {
    */
   async _refreshPrinterList() {
     if (this.stopped || !this.client || !this.connected) return;
+    // Skip once the token was rejected (see bindRefreshDisabled) — no point
+    // re-hitting Bambu every 15 min for a token that can't be refreshed.
+    if (this.bindRefreshDisabled) return;
     let devices;
     try {
       const resp = await axios.get(`${BAMBU_API}/v1/iot-service/api/user/bind`, {
@@ -624,7 +633,18 @@ class PrinterMqttConnection {
       });
       devices = resp.data?.devices || [];
     } catch (err) {
-      log.warn(`[MQTT] printer-list refresh failed for user ${this.userId}: ${err.message}`);
+      // A 401 is expected + harmless: the cached Bambu token expired and Bambu
+      // blocks refresh, so bind-refresh can't succeed until the user re-logs in.
+      // It does NOT drop the live MQTT link (notifications keep flowing) — it
+      // only means newly-added printers won't auto-discover. Disable further
+      // bind-refresh for this connection (re-enabled on a fresh connect) and log
+      // at debug so it doesn't flood; keep genuine errors at warn.
+      if (err.response?.status === 401) {
+        this.bindRefreshDisabled = true;
+        log.debug(`[MQTT] printer-list refresh disabled for user ${this.userId} (token 401 — needs re-login)`);
+      } else {
+        log.warn(`[MQTT] printer-list refresh failed for user ${this.userId}: ${err.message}`);
+      }
       return;
     }
     let added = 0;
