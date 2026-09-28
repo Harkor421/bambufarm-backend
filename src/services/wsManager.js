@@ -434,6 +434,7 @@ class WsManager {
               const bridgeOnline = this.isBridgeConnected(uid);
               ws.send(JSON.stringify({ type: "auth_ok", userId, bridgeOnline }));
               log.debug(`[WS] App connected for uid ${userId} (bridge: ${bridgeOnline ? "online" : "offline"})`);
+              this._sendStateSnapshot(ws, uid);
             })
             .catch((err) => {
               log.error(`[WS] verifyBambuToken (app) threw: ${err.message}`);
@@ -760,6 +761,30 @@ class WsManager {
   hasAppClients(bambuUid) {
     const clients = this.appClients.get(String(bambuUid));
     return !!clients && clients.size > 0;
+  }
+
+  /**
+   * Replay every cached MQTT state for this account to a freshly
+   * authenticated app socket. Without it the app only learns a printer's
+   * state when that printer next reports, so statuses trickled in one by one
+   * over ~5s after launch (and without a push token the app has no other fast
+   * path — /api/printer/mqtt-state requires one). O(printers of this user),
+   * once per connection; lazy require avoids a wsManager ↔ MQTT import cycle.
+   */
+  _sendStateSnapshot(ws, bambuUid) {
+    try {
+      const mqttService = require("./mqttPrinterService");
+      const { normalizeMqttState } = require("../utils/normalizeMqttState");
+      const states = mqttService.getAllPrinterStates(String(bambuUid)) || {};
+      for (const [devId, state] of Object.entries(states)) {
+        if (ws.readyState !== 1) return;
+        ws.send(
+          JSON.stringify({ type: "printer_state", printerId: devId, state: normalizeMqttState(state) })
+        );
+      }
+    } catch (err) {
+      log.debug(`[WS] state snapshot failed for ${bambuUid}: ${err.message}`);
+    }
   }
 
   broadcastMqttState(bambuUid, devId, normalizedState) {
