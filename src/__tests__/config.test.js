@@ -51,3 +51,23 @@ describe("config", () => {
     expect(config.tecnoprints.dedupWindow).toBe(30000);
   });
 });
+
+describe("config.parseIsoDate (LEGACY_GRACE_UNTIL)", () => {
+  const { parseIsoDate } = require("../config");
+
+  it("normalizes a valid ISO date", () => {
+    expect(parseIsoDate("2026-11-01T12:00:00Z")).toBe("2026-11-01T12:00:00.000Z");
+    expect(parseIsoDate(" 2026-11-01 ")).toBe("2026-11-01T00:00:00.000Z");
+  });
+
+  it("returns null when unset or invalid (app then keeps early supporters unlimited)", () => {
+    expect(parseIsoDate(undefined)).toBeNull();
+    expect(parseIsoDate("")).toBeNull();
+    expect(parseIsoDate("not a date")).toBeNull();
+  });
+
+  it("exposes subscription.legacyGraceUntil", () => {
+    expect(config.subscription).toBeDefined();
+    expect("legacyGraceUntil" in config.subscription).toBe(true);
+  });
+});

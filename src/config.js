@@ -3,6 +3,13 @@
  * All environment variables and constants in one place.
  */
 
+/** ISO-8601 string → normalized ISO string, or null when unset/invalid. */
+function parseIsoDate(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const ms = Date.parse(raw.trim());
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
 module.exports = {
   port: Number(process.env.PORT) || 3000,
   mongoUri: process.env.MONGO_URI || "mongodb://localhost:27017/bambufarm",
@@ -79,6 +86,15 @@ module.exports = {
     appIdleThresholdMs: 70000,
   },
 
+  // Subscription grandfathering. Users who had the app before the paywall
+  // (v1.7.0) keep everything unlocked until this instant; after it they fall
+  // to the free tier unless they subscribe. The app reads it from
+  // GET /api/app-config so the date can move without shipping a build.
+  // Unset or unparseable → null → the app treats early supporters as unlimited.
+  subscription: {
+    legacyGraceUntil: parseIsoDate(process.env.LEGACY_GRACE_UNTIL),
+  },
+
   // Training data capture — uploads camera frames to R2 when prints end abnormally
   // (paused, failed, cancelled) or succeed, so we can train our own failure-detection
   // model without relying on the Claude API credits.
@@ -90,3 +106,5 @@ module.exports = {
     bucket: process.env.R2_BUCKET,
   },
 };
+
+module.exports.parseIsoDate = parseIsoDate;

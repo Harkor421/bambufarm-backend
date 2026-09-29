@@ -12,6 +12,7 @@ const publicCameraRoutes = require("./routes/publicCamera");
 const printVisionRoutes = require("./routes/printVision");
 const adminRoutes = require("./routes/admin");
 const adminMetricsRoutes = require("./routes/adminMetrics");
+const appConfigRoutes = require("./routes/appConfig");
 
 const app = express();
 
@@ -122,6 +123,7 @@ app.use("/api", publicCameraRoutes);
 app.use("/api", printVisionRoutes);
 app.use("/api", adminRoutes);
 app.use("/api", adminMetricsRoutes);
+app.use("/api", appConfigRoutes);
 
 // Global error handler. Honor err.status/err.statusCode so body-parser's client
 // errors surface with the right code — malformed JSON as 400 and oversized
