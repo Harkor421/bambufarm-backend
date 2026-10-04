@@ -5,7 +5,36 @@
 
 const log = require("../utils/logger");
 const apns = require("./apnsSender");
-const { getActivityToken, clearActivityToken, isTokenInvalid } = require("./apnsTokenUtils");
+const { getActivityToken, clearActivityToken, clearStartToken, isTokenInvalid, isTokenGone } = require("./apnsTokenUtils");
+const ledger = require("./laStartLedger");
+
+// How long a printing card may go without a newer push before iOS marks it
+// stale. The progress cadence (mqttPrinterConnection) pushes at least every
+// ~10 min while printing, so 30 min only trips if the server stops talking.
+const STALE_AFTER_SEC = 30 * 60;
+// A second "print_started" for the same print within this window is the same
+// transition seen twice (reconnect/first-connect), not a new print.
+const DUPLICATE_START_WINDOW_SEC = 10 * 60;
+
+/**
+ * Send push-to-start to every unique device token, deleting tokens Apple says
+ * are gone (410). Before this, dead start tokens were retried on every print
+ * forever (prod: ~760 410s per 6h). 400 BadDeviceToken is NOT treated as dead
+ * here — after the two-host retry it means a config problem, and deleting would
+ * hide it (Alterna's rule).
+ */
+async function startOnAll(startTokens, attributes, contentState, label) {
+  let anySuccess = false;
+  for (const [tok, user] of startTokens) {
+    const r = await apns.sendLiveActivityStart(tok, attributes, contentState, undefined, { staleAfterSec: STALE_AFTER_SEC });
+    if (r?.success) anySuccess = true;
+    if (isTokenGone(r)) {
+      try { await clearStartToken(user._id, tok); } catch (e) { log.debug(`[LA] clearStartToken failed: ${e.message}`); }
+    }
+    log.info(`[LA] ${label} for ${attributes.printerId}: ${r?.success ? "sent" : isTokenGone(r) ? "token gone (cleared)" : "failed"}`);
+  }
+  return anySuccess;
+}
 const { lookupHmsError } = require("../utils/hmsErrors");
 const { normalizeProgress } = require("./notificationBuilder");
 
@@ -36,6 +65,8 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
   if (!Array.isArray(users) || users.length === 0) return false;
 
   const jobTitle = state.subtask_name || "Print Job";
+  const bambuUid = users[0]?.bambu_uid || "none";
+  const printKey = ledger.printKeyOf(state);
   const nowSec = Math.floor(Date.now() / 1000);
   const remaining = (state.mc_remaining_time || 0) * 60;
   const progress = normalizeProgress(gcodeState, effectivePrev, state.mc_percent);
@@ -65,16 +96,19 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
         endTime: remaining > 0 ? nowSec + remaining : nowSec,
         status: "printing",
       };
-      for (const [tok] of startTokens) {
-        const r = await apns.sendLiveActivityStart(tok, { printerId: devId, printerName }, contentState);
-        if (r?.success) anySuccess = true;
-        log.info(`[LA] print_started for ${devId}: ${r?.success ? "sent" : "failed"}`);
+      const since = ledger.secondsSinceStart(bambuUid, devId);
+      if (ledger.alreadyStarted(bambuUid, devId, printKey) && since != null && since < DUPLICATE_START_WINDOW_SEC) {
+        log.debug(`[LA] print_started for ${devId}: card already started ${since}s ago — skipping duplicate`);
+        return false;
       }
+      anySuccess = await startOnAll(startTokens, { printerId: devId, printerName }, contentState, "print_started");
+      if (anySuccess) ledger.recordStart(bambuUid, devId, printKey);
       return anySuccess;
     }
 
     if (type === "print_finished" || type === "print_error") {
       const isCancelled = type === "print_error";
+      ledger.clear(bambuUid, devId);
       if (activityTokens.size === 0) {
         // Print ended but we never had an activity token — LA either expired or
         // never existed. Nothing to end. Quietly skip; this is normal.
@@ -118,7 +152,10 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
 
     if (activityTokens.size > 0) {
       for (const [tok, { user }] of activityTokens) {
-        const r = await apns.sendLiveActivityUpdate(tok, contentState, 10);
+        const r = await apns.sendLiveActivityUpdate(
+          tok, contentState, 10,
+          status === "printing" ? { staleAfterSec: STALE_AFTER_SEC } : {}
+        );
         if (r?.success) anySuccess = true;
         if (isTokenInvalid(r)) await clearActivityToken(String(user._id), devId);
         log.info(`[LA] ${type} for ${devId}: ${progress * 100 | 0}% — ${r?.success ? "sent" : "failed"}`);
@@ -126,16 +163,20 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
       return anySuccess;
     }
 
-    // FALLBACK: No activity token but the print is still active. The previous
-    // LA either expired (12h limit) or was never received. Spawn a fresh LA
-    // via push-to-start so the user still sees the current state. Without this
-    // fallback, paused/resumed events for long prints get lost silently.
+    // FALLBACK: no activity token but the print is still active. Only when we
+    // have NOT already started a card for this print — e.g. the print began
+    // before this server process (restart) or before the user had a start
+    // token. If we did start one, a second start would just stack another
+    // card on the lock screen next to the frozen first one (the old behaviour:
+    // ~650 stacked cards per 6h in prod). That card refreshes as soon as the
+    // app runs and registers its update token.
     if (startTokens.size > 0) {
-      for (const [tok] of startTokens) {
-        const r = await apns.sendLiveActivityStart(tok, { printerId: devId, printerName }, contentState);
-        if (r?.success) anySuccess = true;
-        log.info(`[LA] ${type} fallback push-to-start for ${devId}: ${r?.success ? "sent" : "failed"}`);
+      if (ledger.alreadyStarted(bambuUid, devId, printKey)) {
+        log.debug(`[LA] ${type} for ${devId}: card already started for this print, no update token yet — not stacking another`);
+        return false;
       }
+      anySuccess = await startOnAll(startTokens, { printerId: devId, printerName }, contentState, `${type} fallback push-to-start`);
+      if (anySuccess) ledger.recordStart(bambuUid, devId, printKey);
       return anySuccess;
     }
 

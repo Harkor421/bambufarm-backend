@@ -4,6 +4,7 @@ const { verifyBambuToken } = require("./wsTokenAuth");
 const eventBus = require("./eventBus");
 const { EVENTS } = require("./eventBus");
 const config = require("../config");
+const egressMeter = require("./egressMeter");
 
 const MSG_CAMERA_FRAME = 0x01;
 
@@ -26,6 +27,11 @@ const MSG_CAMERA_FRAME = 0x01;
 class WsManager {
   constructor() {
     this._printerStateGetter = null; // set via setPrinterStateGetter()
+
+    // Last full printer_state JSON broadcast per `${uid}:${devId}` — identical
+    // states are not re-sent (egress). Cleared when the account's last app
+    // socket closes.
+    this._lastStateJson = new Map();
 
     // Last-sent demand signature per user, so we don't resend identical sets.
     // Prevents log spam and camera disconnect/reconnect cycles when MQTT state
@@ -122,6 +128,17 @@ class WsManager {
   _onConnection(ws, req, path) {
     ws._isAlive = true;
     ws.on("pong", () => { ws._isAlive = true; });
+
+    // Egress attribution: binary sends are camera frames, text is JSON
+    // (printer_state and friends). See services/egressMeter.
+    const kind = path === "/ws/bridge" ? "bridge" : path === "/ws/app" ? "app" : "public";
+    egressMeter.meterSocket(ws, (data) =>
+      typeof data !== "string"
+        ? `ws:${kind}:binary`
+        : data.startsWith('{"type":"printer_state"')
+          ? `ws:${kind}:printer_state`
+          : `ws:${kind}:json`
+    );
 
     if (path === "/ws/bridge") {
       this._handleBridge(ws, req);
@@ -424,6 +441,10 @@ class WsManager {
               clearTimeout(authTimeout);
 
               this.appMeta.set(ws, { userId, subscribedPrinters: new Set() });
+              // Clients that merge partial states (app ≥ the version that sends
+              // caps:["delta"]) get only the fields that changed per printer.
+              // Everyone else keeps receiving the full state, unchanged.
+              ws._delta = Array.isArray(msg.caps) && msg.caps.includes("delta");
               if (!this.appClients.has(userId)) this.appClients.set(userId, new Set());
               this.appClients.get(userId).add(ws);
               // Start the client-ping clock — _relayFrame skips clients whose
@@ -475,7 +496,13 @@ class WsManager {
       if (userId) {
         this.appMeta.delete(ws);
         const set = this.appClients.get(userId);
-        if (set) { set.delete(ws); if (set.size === 0) this.appClients.delete(userId); }
+        if (set) {
+          set.delete(ws);
+          if (set.size === 0) {
+            this.appClients.delete(userId);
+            this._forgetSentStates(userId);
+          }
+        }
         log.debug(`[WS] App disconnected for uid ${userId}`);
         this._notifyBridgeDemand(userId);
       }
@@ -778,9 +805,12 @@ class WsManager {
       const states = mqttService.getAllPrinterStates(String(bambuUid)) || {};
       for (const [devId, state] of Object.entries(states)) {
         if (ws.readyState !== 1) return;
-        ws.send(
-          JSON.stringify({ type: "printer_state", printerId: devId, state: normalizeMqttState(state) })
-        );
+        const normalized = normalizeMqttState(state);
+        // A fresh socket has no baseline, so a delta client gets the full state
+        // here too — this only seeds what later deltas are computed against.
+        const payload = ws._delta ? this._diffForSocket(ws, devId, normalized) : normalized;
+        if (!payload) continue;
+        ws.send(JSON.stringify({ type: "printer_state", printerId: devId, state: payload }));
       }
     } catch (err) {
       log.debug(`[WS] state snapshot failed for ${bambuUid}: ${err.message}`);
@@ -788,17 +818,64 @@ class WsManager {
   }
 
   broadcastMqttState(bambuUid, devId, normalizedState) {
-    const clients = this.appClients.get(String(bambuUid));
+    const uid = String(bambuUid);
+    const clients = this.appClients.get(uid);
     if (!clients || clients.size === 0) return;
-    const msg = JSON.stringify({
-      type: "printer_state",
-      printerId: devId,
-      state: normalizedState,
-    });
+
+    // Egress: a printer reports ~every second but most reports change nothing
+    // the app shows (temps are rounded in normalizeMqttState). An identical
+    // state is not re-sent to anyone.
+    const fullJson = JSON.stringify(normalizedState);
+    const dedupeKey = `${uid}:${devId}`;
+    if (this._lastStateJson.get(dedupeKey) === fullJson) return;
+    this._lastStateJson.set(dedupeKey, fullJson);
+
+    let fullMsg = null;
     for (const ws of clients) {
-      if (ws.readyState === 1) {
-        try { ws.send(msg); } catch {}
+      if (ws.readyState !== 1) continue;
+      let msg;
+      if (ws._delta) {
+        const partial = this._diffForSocket(ws, devId, normalizedState);
+        if (!partial) continue;
+        msg = JSON.stringify({ type: "printer_state", printerId: devId, state: partial });
+      } else {
+        msg = fullMsg ??= `{"type":"printer_state","printerId":${JSON.stringify(devId)},"state":${fullJson}}`;
       }
+      try { ws.send(msg); } catch {}
+    }
+  }
+
+  /**
+   * The top-level fields of `state` that differ from what THIS socket was last
+   * sent for `devId` (null when nothing changed). Values are compared as JSON so
+   * nested `ams`/`hms` only travel when they actually change — the AMS block is
+   * most of a full message. The app reducer merges per printer
+   * (`{ ...prev, ...state }`), so a partial state is applied correctly.
+   */
+  _diffForSocket(ws, devId, state) {
+    if (!ws._sentState) ws._sentState = new Map();
+    const prev = ws._sentState.get(devId);
+    const next = {};
+    const out = {};
+    let changed = false;
+    for (const [key, val] of Object.entries(state || {})) {
+      const v = val === undefined ? null : val;
+      const j = JSON.stringify(v);
+      next[key] = j;
+      if (!prev || prev[key] !== j) {
+        out[key] = v;
+        changed = true;
+      }
+    }
+    ws._sentState.set(devId, next);
+    return changed ? out : null;
+  }
+
+  /** Drop the broadcast dedupe entries of an account with no app connected. */
+  _forgetSentStates(uid) {
+    const prefix = `${uid}:`;
+    for (const k of this._lastStateJson.keys()) {
+      if (k.startsWith(prefix)) this._lastStateJson.delete(k);
     }
   }
 

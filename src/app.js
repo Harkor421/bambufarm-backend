@@ -69,6 +69,9 @@ app.use((req, res, next) => {
 
 // Security headers (skip for public + admin metrics routes — they need cross-origin
 // image loads which Helmet's default CORP=same-origin blocks).
+// Count response bytes per route group (egress is the billed network).
+app.use(require("./services/egressMeter").httpMiddleware);
+
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/public/")) return next();
   if (req.path.startsWith("/api/admin/metrics/")) return next();
@@ -100,6 +103,9 @@ const adminMetricsLimiter = rateLimit({
   legacyHeaders: false,
   message: { ok: false, error: "Too many attempts, try again later" },
 });
+
+// Count response bytes per route group (egress is the billed network).
+app.use(require("./services/egressMeter").httpMiddleware);
 
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/public/")) return next();

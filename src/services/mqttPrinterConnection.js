@@ -52,6 +52,10 @@ const PRUNE_TOP_LEVEL = [
   "big_fan2_speed", "heatbreak_fan_speed", "fan_gear",
 ];
 
+// Live Activity progress cadence between the 20% priority-10 milestones.
+const LA_TICK_MIN_MS = 3 * 60 * 1000;
+const LA_HEARTBEAT_MS = 10 * 60 * 1000;
+
 class PrinterMqttConnection {
   constructor({ userId, bambuUid, accessToken, printerIds, onStateChange, onProgressUpdate, onOffline }) {
     this.userId = userId;
@@ -550,18 +554,31 @@ class PrinterMqttConnection {
       log.debug(`[MQTT] broadcastMqttState failed for ${devId}: ${err.message}`);
     }
 
-    // Send LA progress update at 20% boundaries only (0%, 20%, 40%, 60%, 80%, 100%).
-    // Apple's APNs budget for Live Activities is ~4-5 priority-10 updates/hour — a
-    // 24h print on time-based polling would blow that budget 100x over and get the
-    // LA silenced. Progress-based updates = ~6 per print, well within budget.
+    // Live Activity progress cadence (Alterna's pattern, with our proven path kept):
+    //  · every 20% milestone → priority 10. Counts against Apple's hourly LA
+    //    budget, so only ~6 per print — this alone used to be ALL we sent,
+    //    which left a 10h print's card frozen for 2h at a time.
+    //  · between milestones → priority 5, which Apple does not count against
+    //    the budget: when progress moved ≥1% and ≥3 min since the last push,
+    //    or every 10 min regardless if the remaining time was re-estimated
+    //    (keeps the lock-screen countdown honest).
+    // Pushes are ~0.5 KB and only go to printers whose card has an update
+    // token, so the extra cost is negligible next to the WS traffic.
     if (merged.gcode_state === "RUNNING" && merged.mc_percent != null) {
-      const bucket = Math.floor(merged.mc_percent / 20); // 0..5
-      if (!this._lastProgressBucket) this._lastProgressBucket = new Map();
-      const lastBucket = this._lastProgressBucket.get(devId);
-      if (lastBucket == null || bucket > lastBucket) {
-        this._lastProgressBucket.set(devId, bucket);
+      const pct = Number(merged.mc_percent) || 0;
+      const remaining = merged.mc_remaining_time ?? null;
+      const bucket = Math.floor(pct / 20); // 0..5
+      if (!this._laProgress) this._laProgress = new Map();
+      const last = this._laProgress.get(devId);
+      const now = Date.now();
+      let priority = null;
+      if (!last || bucket > last.bucket) priority = 10;
+      else if (now - last.at >= LA_TICK_MIN_MS && pct - last.pct >= 1) priority = 5;
+      else if (now - last.at >= LA_HEARTBEAT_MS && (pct !== last.pct || remaining !== last.remaining)) priority = 5;
+      if (priority) {
+        this._laProgress.set(devId, { bucket, pct, remaining, at: now });
         try {
-          if (this.onProgressUpdate) await this.onProgressUpdate(devId, merged);
+          if (this.onProgressUpdate) await this.onProgressUpdate(devId, merged, priority);
         } catch (err) {
           log.error(`[MQTT] onProgressUpdate error for ${devId}: ${err.message}`);
         }
@@ -572,8 +589,8 @@ class PrinterMqttConnection {
       merged.gcode_state !== "PAUSE"
     ) {
       // Print ended (FINISH/IDLE/FAILED) — reset so the next print on this printer
-      // starts the bucket progression from 0 again.
-      if (this._lastProgressBucket) this._lastProgressBucket.delete(devId);
+      // starts the cadence from 0 again.
+      if (this._laProgress) this._laProgress.delete(devId);
     }
   }
 

@@ -1,6 +1,8 @@
 const { Router } = require("express");
 const User = require("../db/models/User");
 const { invalidateUserToken } = require("../services/userTokenCache");
+const laUserCache = require("../services/laUserCache");
+const laStartLedger = require("../services/laStartLedger");
 const log = require("../utils/logger");
 
 const router = Router();
@@ -174,13 +176,25 @@ router.post("/activity-token", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Invalid activityUpdateToken format" });
     }
 
-    await User.findOneAndUpdate(
+    const updated = await User.findOneAndUpdate(
       { expo_push_token: expoPushToken },
-      { [`la_activity_tokens.${printerId}`]: activityUpdateToken }
+      { [`la_activity_tokens.${printerId}`]: activityUpdateToken },
+      { projection: { bambu_uid: 1 } }
     );
     invalidateUserToken(expoPushToken);
+    // The progress path caches this account's LA tokens for 60s — drop it so
+    // the very next progress tick already reaches the new card.
+    laUserCache.invalidate(updated?.bambu_uid);
 
-    log.info(`[ACTIVITY-TOKEN] Stored token for printer ${printerId} (${activityUpdateToken.slice(0, 16)}...)`);
+    // How long after we created the card by push did its update token arrive?
+    // Seconds = iOS woke the app; minutes/hours = it only arrived when the
+    // user opened the app (the card was frozen until then). Alterna measures
+    // the same thing ("medirElDespertar").
+    const since = updated?.bambu_uid ? laStartLedger.secondsSinceStart(updated.bambu_uid, printerId) : null;
+    log.info(
+      `[ACTIVITY-TOKEN] Stored token for printer ${printerId} (${activityUpdateToken.slice(0, 16)}...)` +
+        (since != null ? ` — ${since}s after push-to-start` : "")
+    );
     res.json({ ok: true });
   } catch (err) {
     log.error(`[ACTIVITY-TOKEN] Error: ${err.message}`);

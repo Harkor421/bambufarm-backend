@@ -17,6 +17,10 @@ const PrinterState = require("../db/models/PrinterState");
 const { sendPush } = require("./pushSender");
 const apns = require("./apnsSender");
 const { getActivityToken, clearActivityToken, isTokenInvalid } = require("./apnsTokenUtils");
+const laUserCache = require("./laUserCache");
+// A printing card iOS marks stale if no newer push arrives in time (the
+// progress cadence pushes at least every ~10 min while printing).
+const LA_STALE_AFTER_SEC = 30 * 60;
 const { ensureFreshToken } = require("./tokenRefresh");
 const PrinterMqttConnection = require("./mqttPrinterConnection");
 const eventBus = require("./eventBus");
@@ -369,9 +373,11 @@ class MqttPrinterService {
                 log.warn(`[MQTT] onOffline dispatch error: ${e.message}`);
               }
             },
-            onProgressUpdate: async (devId, state) => {
-              // Update LA via activity update token (push-to-start only works for "start" event)
-              const allUsers = await User.find({ bambu_uid: bambuUid, fail_count: { $lt: 5 } }).lean();
+            onProgressUpdate: async (devId, state, priority = 10) => {
+              // Update LA via activity update token (push-to-start only works for "start" event).
+              // Cached per account (60s) — this now runs every few minutes per printing printer.
+              if (!apns.isConfigured()) return;
+              const allUsers = await laUserCache.getUsers(bambuUid);
               const nowSec = Math.floor(Date.now() / 1000);
               const progress = (state.mc_percent || 0) / 100;
               const remaining = (state.mc_remaining_time || 0) * 60;
@@ -391,13 +397,16 @@ class MqttPrinterService {
                 if (!actToken || sentTokens.has(actToken)) continue;
                 sentTokens.add(actToken);
                 try {
-                  const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10);
+                  const r = await apns.sendLiveActivityUpdate(actToken, contentState, priority, { staleAfterSec: LA_STALE_AFTER_SEC });
                   if (r?.success) {
-                    log.debug(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}%`);
+                    log.debug(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}% (p${priority})`);
                   } else {
                     log.warn(`[APNS] Progress failed ${pName} (${r?.status}): ${r?.reason?.reason}`);
                   }
-                  if (isTokenInvalid(r)) await clearActivityToken(u._id, devId);
+                  if (isTokenInvalid(r)) {
+                    await clearActivityToken(u._id, devId);
+                    laUserCache.invalidate(bambuUid);
+                  }
                 } catch (e) {
                   log.warn(`[APNS] Progress error ${pName}: ${e.message}`);
                 }
@@ -501,7 +510,7 @@ class MqttPrinterService {
               jobTitle: jobTitle,
               progress: mcProgress,
               startTime: nowSec,
-              endTime: mcRemaining > 0 ? nowSec + mcRemaining : nowSec + 3600,
+              endTime: mcRemaining > 0 ? nowSec + mcRemaining : nowSec,
               status: "printing",
             };
             // Use activity update token from ANY user record with same bambu_uid
@@ -512,7 +521,7 @@ class MqttPrinterService {
               // Priority 10 — first-connect recovery LA must surface immediately
               // (the memory of priority-5 updates getting throttled is why we force 10
               // for every LA update site).
-              const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10);
+              const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10, { staleAfterSec: LA_STALE_AFTER_SEC });
               if (r?.success) {
                 log.debug(`[MQTT] LA update sent for ${devId}`);
                 break;

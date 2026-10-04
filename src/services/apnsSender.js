@@ -19,6 +19,28 @@ let jwtIssuedAt = 0;
 let h2Client = null;
 let h2ClientSandbox = null;
 
+// A request APNs never answers must not hang its caller forever: the progress
+// path awaits these sends inside the MQTT report handler.
+const REQUEST_TIMEOUT_MS = 15000;
+
+// How long APNs may hold a push for an offline/asleep device before dropping
+// it. "0" (the old value) meant "deliver now or never", so any phone that was
+// briefly unreachable silently missed the update. APNs keeps only the newest
+// push per device, and `timestamp` makes iOS ignore an older content-state,
+// so a late delivery can never roll a card backwards.
+const EXPIRATION_SEC = { update: 10 * 60, start: 60 * 60, end: 4 * 60 * 60 };
+
+// Which APNs host accepted each token (true = sandbox). Dev/TestFlight-era
+// tokens only work against sandbox; without remembering that, every push to
+// such a token paid a production round trip + BadDeviceToken first. In memory
+// on purpose: a restart costs one extra trip per token. Bounded.
+const sandboxByToken = new Map();
+const MAX_LEARNED_HOSTS = 5000;
+function rememberHost(token, sandbox) {
+  if (sandboxByToken.size >= MAX_LEARNED_HOSTS) sandboxByToken.clear();
+  sandboxByToken.set(token, sandbox);
+}
+
 function isConfigured() {
   return !!((APNS_KEY_PATH || APNS_KEY_CONTENTS) && APNS_KEY_ID && APNS_TEAM_ID);
 }
@@ -88,7 +110,7 @@ function getClient(sandbox = false) {
  * @param {number} priority - 5 (may delay) or 10 (immediate)
  * @returns {Promise<{success: boolean, status: number, reason?: string}>}
  */
-function sendAPNsRaw(deviceToken, payload, priority = 10, sandbox = false) {
+function sendAPNsRaw(deviceToken, payload, priority = 10, sandbox = false, expirationSec = 0) {
   return new Promise((resolve) => {
     const token = getJWT();
     if (!token) {
@@ -111,8 +133,10 @@ function sendAPNsRaw(deviceToken, payload, priority = 10, sandbox = false) {
       "apns-push-type": "liveactivity",
       "apns-topic": APNS_TOPIC,
       "apns-priority": String(priority),
-      "apns-expiration": "0",
+      "apns-expiration": String(expirationSec > 0 ? Math.floor(Date.now() / 1000) + expirationSec : 0),
     });
+
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error("APNs request timed out")));
 
     let responseData = "";
     let statusCode = 0;
@@ -152,13 +176,18 @@ function sendAPNsRaw(deviceToken, payload, priority = 10, sandbox = false) {
  * Send APNs push — tries production first, falls back to sandbox on BadDeviceToken.
  * This handles both dev and production builds transparently.
  */
-async function sendAPNs(deviceToken, payload, priority = 10) {
-  const result = await sendAPNsRaw(deviceToken, payload, priority, false);
-  // If production returns BadDeviceToken, the token might be from a dev build — try sandbox
+async function sendAPNs(deviceToken, payload, priority = 10, expirationSec = 0) {
+  let sandbox = sandboxByToken.get(deviceToken) === true;
+  let result = await sendAPNsRaw(deviceToken, payload, priority, sandbox, expirationSec);
+  // BadDeviceToken almost always means "wrong host" (dev/TestFlight token on
+  // production or vice versa), not a bad token: try the other host once and
+  // remember whichever answered, so the double trip is paid once per token.
   if (result.status === 400 && result.reason?.reason === "BadDeviceToken") {
-    log.info(`[APNS] Production rejected token, trying sandbox...`);
-    return sendAPNsRaw(deviceToken, payload, priority, true);
+    sandbox = !sandbox;
+    log.debug(`[APNS] BadDeviceToken — retrying on ${sandbox ? "sandbox" : "production"}`);
+    result = await sendAPNsRaw(deviceToken, payload, priority, sandbox, expirationSec);
   }
+  if (result.success) rememberHost(deviceToken, sandbox);
   return result;
 }
 
@@ -169,48 +198,59 @@ async function sendAPNs(deviceToken, payload, priority = 10) {
  * @param {object} contentState - { jobTitle, progress, startTime, endTime, status }
  * @param {object} [alert] - optional { title, body }
  */
-async function sendLiveActivityStart(pushToStartToken, attributes, contentState, alert) {
+async function sendLiveActivityStart(pushToStartToken, attributes, contentState, alert, { staleAfterSec } = {}) {
   if (!isConfigured()) return null;
 
+  const now = Math.floor(Date.now() / 1000);
   const payload = {
     aps: {
-      timestamp: Math.floor(Date.now() / 1000),
+      timestamp: now,
       event: "start",
       "content-state": contentState,
       "attributes-type": "PrintActivityAttributes",
       attributes,
+      // Required: without `alert` APNs answers 200 and no card is created.
       alert: alert || {
         title: `${attributes.printerName} started printing`,
         body: contentState.jobTitle || "Print Job",
       },
     },
   };
+  if (staleAfterSec > 0) payload.aps["stale-date"] = now + staleAfterSec;
 
-  return sendAPNs(pushToStartToken, payload, 10);
+  return sendAPNs(pushToStartToken, payload, 10, EXPIRATION_SEC.start);
 }
 
 /**
  * Update an existing Live Activity.
  *
- * Priority MUST be 10 — APNs throttles priority-5 LA updates aggressively
- * (project memory: "Live Activity Architecture"). Every real call site already
- * passes 10; the default just protects against accidental priority-5 sends.
+ * Priority: 10 for anything the user must see now (state changes, the 20%
+ * milestones) — those count against Apple's hourly LA budget. The routine
+ * progress ticks between milestones go at 5, which Apple does NOT count
+ * against the budget and delivers opportunistically (Alterna runs its card on
+ * priority-5 updates). The default stays 10 so an un-thought-out call site
+ * can never silently downgrade.
  *
  * @param {string} activityUpdateToken - hex token from activity.pushTokenUpdates
  * @param {object} contentState - { jobTitle, progress, startTime, endTime, status }
+ * @param {number} [priority=10]
+ * @param {{ staleAfterSec?: number }} [opts] - mark the card stale if nothing
+ *   newer arrives in time, instead of showing old progress as if it were live.
  */
-async function sendLiveActivityUpdate(activityUpdateToken, contentState, priority = 10) {
+async function sendLiveActivityUpdate(activityUpdateToken, contentState, priority = 10, { staleAfterSec } = {}) {
   if (!isConfigured()) return null;
 
+  const now = Math.floor(Date.now() / 1000);
   const payload = {
     aps: {
-      timestamp: Math.floor(Date.now() / 1000),
+      timestamp: now,
       event: "update",
       "content-state": contentState,
     },
   };
+  if (staleAfterSec > 0) payload.aps["stale-date"] = now + staleAfterSec;
 
-  return sendAPNs(activityUpdateToken, payload, priority);
+  return sendAPNs(activityUpdateToken, payload, priority === 5 ? 5 : 10, EXPIRATION_SEC.update);
 }
 
 /**
@@ -232,7 +272,7 @@ async function sendLiveActivityEnd(activityUpdateToken, finalContentState, dismi
     },
   };
 
-  return sendAPNs(activityUpdateToken, payload, 10);
+  return sendAPNs(activityUpdateToken, payload, 10, EXPIRATION_SEC.end);
 }
 
 module.exports = {

@@ -23,4 +23,21 @@ function isTokenInvalid(result) {
   return false;
 }
 
-module.exports = { getActivityToken, clearActivityToken, isTokenInvalid };
+/**
+ * Apple says this token will never work again (410: the app was uninstalled,
+ * Live Activities were turned off, or the activity ended). The only status that
+ * is cured by deleting — see Alterna's apns.ts.
+ */
+function isTokenGone(result) {
+  return !!result && result.status === 410;
+}
+
+/**
+ * Remove a dead push-to-start token — only if the record still holds THAT
+ * token, so a fresher one registered meanwhile is never wiped.
+ */
+function clearStartToken(userId, token) {
+  return User.updateOne({ _id: userId, la_push_to_start_token: token }, { la_push_to_start_token: null });
+}
+
+module.exports = { getActivityToken, clearActivityToken, clearStartToken, isTokenInvalid, isTokenGone };

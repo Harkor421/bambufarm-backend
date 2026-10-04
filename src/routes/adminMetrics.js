@@ -15,6 +15,7 @@ require("./adminMetrics/printers")(router);
 require("./adminMetrics/users")(router);
 require("./adminMetrics/bridges")(router);
 require("./adminMetrics/cameras")(router);
+require("./adminMetrics/egress")(router);
 require("./adminMetrics/activity")(router);
 require("./adminMetrics/printerOps")(router);
 

@@ -51,6 +51,16 @@ function extractAms(state) {
   }
 }
 
+// Temperatures arrive with sub-degree noise (219.875 → 220.03 → 219.9…) on
+// nearly every report. The app shows them rounded (Math.round) and charts them
+// per sample, so whole degrees change nothing visible — and they let the WS
+// layer skip re-sending an otherwise identical state (egress).
+function roundTemp(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
 function normalizeMqttState(state) {
   if (!state) return null;
   return {
@@ -60,11 +70,11 @@ function normalizeMqttState(state) {
     layerNum: state.layer_num ?? null,
     totalLayers: state.total_layer_num ?? null,
     subtaskName: state.subtask_name || null,
-    nozzleTemp: state.nozzle_temper ?? null,
-    nozzleTarget: state.nozzle_target_temper ?? null,
-    bedTemp: state.bed_temper ?? null,
-    bedTarget: state.bed_target_temper ?? null,
-    chamberTemp: state.chamber_temper ?? null,
+    nozzleTemp: roundTemp(state.nozzle_temper),
+    nozzleTarget: roundTemp(state.nozzle_target_temper),
+    bedTemp: roundTemp(state.bed_temper),
+    bedTarget: roundTemp(state.bed_target_temper),
+    chamberTemp: roundTemp(state.chamber_temper),
     speedLevel: state.spd_lvl ?? null,
     speedMag: state.spd_mag ?? null,
     wifiSignal: state.wifi_signal || null,
