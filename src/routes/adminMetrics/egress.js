@@ -8,6 +8,6 @@ const egressMeter = require("../../services/egressMeter");
  */
 module.exports = (router) => {
   router.get("/admin/metrics/egress", requireAdmin, (_req, res) => {
-    res.json({ ok: true, ...egressMeter.snapshot() });
+    res.json({ ok: true, ...egressMeter.snapshot(), sockets: egressMeter.socketSnapshot() });
   });
 };

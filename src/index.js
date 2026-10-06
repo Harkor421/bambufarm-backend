@@ -1,4 +1,8 @@
 require("dotenv").config();
+// First, before any library opens a socket: attribute real network bytes by
+// destination (MQTT/Mongo/HTTPS/inbound) — see services/egressMeter.
+const egressMeter = require("./services/egressMeter");
+egressMeter.installSocketMeter();
 
 const http = require("http");
 const app = require("./app");
@@ -19,6 +23,7 @@ async function main() {
 
   // Create HTTP server from Express app (needed for WebSocket upgrade)
   const server = http.createServer(app);
+  egressMeter.meterServer(server);
 
   // Attach WebSocket handling
   wsManager.attach(server);
