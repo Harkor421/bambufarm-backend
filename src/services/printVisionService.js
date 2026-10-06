@@ -282,22 +282,11 @@ class PrintVisionService {
 
       log.info(`[VISION] Notified ${sentTokens.size} user(s) for ${devId}: ${issueList}`);
 
-      // Send camera frame + alert to Tecnoprints broadcast
-      this._broadcastWithImage(bambuUid, devId, result, mqttState).catch((e) => {
-        log.error(`[VISION] Broadcast error: ${e.message}`);
-      });
     } catch (e) {
       log.error(`[VISION] Notify error: ${e.message}`);
     }
   }
 
-  async _broadcastWithImage(bambuUid, devId, result, _mqttState) {
-    const { broadcastWithImage } = require("./tecnoprintsBroadcast");
-    const frame = require("./wsManager").getLatestFrame(bambuUid, devId);
-    const issueList = result.issues?.join(", ") || "print issue";
-    const message = `🚨 ${devId} — ${issueList}: ${result.detail || "Check print"}`;
-    await broadcastWithImage(message, frame);
-  }
 }
 
 const printVisionService = new PrintVisionService();

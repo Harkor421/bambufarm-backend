@@ -43,11 +43,6 @@ async function sendPush(expoPushToken, { title, body, data }) {
 
     log.info(`[PUSH] Sent to ${expoPushToken.slice(0, 30)}...: "${title}"`);
 
-    // NOTE: Tecnoprints WhatsApp broadcast is handled in mqttPrinterService's
-    // onStateChange (with the camera frame attached). Don't fire a text-only
-    // broadcast here — it caused every state change to send TWO WhatsApp
-    // messages: the text version from this path + the with-image version
-    // from mqttPrinterService.
 
     return r.data;
   } catch (err) {

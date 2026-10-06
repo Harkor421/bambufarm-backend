@@ -305,38 +305,6 @@ class MqttPrinterService {
                 sentPushTokens.add(u.expo_push_token);
                 await this._handleStateChange(u, devId, state, prevGcodeState, true, printerNames);
               }
-
-              // Send camera frame + status to Tecnoprints WhatsApp on real
-              // state transitions only. buildBroadcastMessage returns null when
-              // prevGcodeState is undefined (backend-boot first message) — without
-              // that guard, any printer lingering in FAILED state from a previous
-              // run would blast a fresh "⚠️ failed at 0%" ghost alert.
-              const { isTecnoprintsAccount, broadcastWithImage, buildBroadcastMessage } = require("./tecnoprintsBroadcast");
-              if (isTecnoprintsAccount(bambuUid)) {
-                const gcState = state.gcode_state;
-                const pName = printerNames[devId] || devId;
-                const jobName = state.subtask_name || "Print Job";
-                const pct = state.mc_percent || 0;
-                const msg = buildBroadcastMessage(gcState, prevGcodeState, pName, jobName, pct);
-
-                if (msg) {
-                  await new Promise(r => setTimeout(r, 2000));
-                  // For "finished" (success) broadcasts, prefer the pre-end frame
-                  // captured at 95-99% progress — otherwise the camera shows the
-                  // plate already lowered, which isn't what Tecnoprints wants to see.
-                  const isFinishedMsg = gcState === "FINISH" || (gcState === "IDLE" && prevGcodeState === "RUNNING" && pct >= 90);
-                  let frame = null;
-                  if (isFinishedMsg) {
-                    try {
-                      const { getPreEndFrame } = require("./trainingDataCapture");
-                      frame = getPreEndFrame(bambuUid, devId);
-                    } catch {}
-                  }
-                  // Fallback for non-success messages OR if we don't have a pre-end frame
-                  if (!frame) frame = mqttService._getFrame?.(bambuUid, devId) || null;
-                  broadcastWithImage(msg, frame).catch(() => {});
-                }
-              }
             },
             onOffline: async (devId) => {
               // A printer we'd been hearing from went silent. Notify every

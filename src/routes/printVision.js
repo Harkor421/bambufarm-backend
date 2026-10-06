@@ -5,10 +5,10 @@ const log = require("../utils/logger");
 
 const router = Router();
 
-// SECURITY: these are operator/Tecnoprints-only endpoints, NOT user-facing (the
+// SECURITY: these are operator-only endpoints, NOT user-facing (the
 // mobile app never calls /vision/*). They were gated ONLY by the shared,
 // app-embedded API key — so any client holding it could POST /vision/test-broadcast
-// to fire a real Tecnoprints WhatsApp broadcast and read per-printer AI analysis.
+// to read per-printer AI analysis.
 // Require the admin password, matching admin.js.
 router.use("/vision", requireAdmin);
 
@@ -71,37 +71,6 @@ router.get("/vision/status", async (req, res) => {
   } catch (err) {
     log.error(`[VISION] Status error: ${err.message}`);
     res.status(500).json({ ok: false, error: "Internal error" });
-  }
-});
-
-// POST /api/vision/test-broadcast — test sending a camera snapshot to Tecnoprints
-// Body: { printerId, uid?, message? }
-router.post("/vision/test-broadcast", async (req, res) => {
-  try {
-    const { printerId, uid, message } = req.body;
-    if (!printerId) return res.status(400).json({ ok: false, error: "Missing printerId" });
-
-    const cfg = require("../config");
-    const bambuUid = uid || cfg.vision.targetUid || cfg.tecnoprints.bambuUid;
-    const wsManager = require("../services/wsManager");
-    const { broadcastWithImage } = require("../services/tecnoprintsBroadcast");
-
-    const frame = wsManager.getLatestFrame(bambuUid, printerId);
-    const frameInfo = frame ? `${frame.length} bytes` : "NO FRAME";
-    log.info(`[VISION-TEST] Frame for ${printerId} (uid=${bambuUid}): ${frameInfo}`);
-
-    const msg = message || `🧪 Test broadcast for ${printerId} — frame: ${frameInfo}`;
-    await broadcastWithImage(msg, frame);
-
-    res.json({
-      ok: true,
-      frameBytes: frame?.length || 0,
-      hasFrame: !!(frame && frame.length > 100),
-      message: msg,
-    });
-  } catch (err) {
-    log.error(`[VISION-TEST] Error: ${err.message}`);
-    res.status(500).json({ ok: false, error: err.message });
   }
 });
 

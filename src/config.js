@@ -68,12 +68,6 @@ module.exports = {
     notifyCooldown: 900000, // 15 min
   },
 
-  tecnoprints: {
-    bambuUid: process.env.TECNOPRINTS_UID || "1789751384",
-    broadcastUrl: process.env.TECNOPRINTS_URL || "https://backend-production-b1e9.up.railway.app/api/broadcast/tecnoprints",
-    dedupWindow: 30000, // 30s
-  },
-
   ws: {
     heartbeatInterval: 60000,
     frameThrottle: 2000, // min ms between frame relays

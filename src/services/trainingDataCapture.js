@@ -26,14 +26,15 @@ let s3Client = null;
 // We stash the last frame seen while progress was 95-99% for each active print,
 // keyed by `${bambuUid}:${printerId}`.
 //
-// Lifecycle: entries are written by maybeStashPreEndFrame and read by both
-// captureTransition (R2 upload) and the Tecnoprints WhatsApp broadcast. We do
-// NOT clear entries after read — the previous code did, which raced with the
-// 2-second Tecnoprints sleep and caused the broadcast to fall back to the
-// post-plate-lower frame. Entries naturally get overwritten when the next
-// print on the same printer reaches the 95-99% window. A periodic sweep below
-// caps total entries and drops anything older than ~6 hours.
+// Lifecycle: entries are written by maybeStashPreEndFrame and read by
+// captureTransition (R2 upload). Entries are not cleared after read; they get
+// overwritten when the next print on the same printer reaches the 95-99%
+// window, and a periodic sweep below caps total entries and drops anything
+// older than ~6 hours.
 const preEndFrames = new Map();
+// Cameras only stream while someone is watching, so the cached frame can be
+// stale; a training sample must be from (about) this moment or not at all.
+const FRESH_FRAME_MS = 90 * 1000;
 const PRE_END_PROGRESS_MIN = 95;
 const PRE_END_PROGRESS_MAX = 99;
 const PRE_END_MAX_ENTRIES = 500;
@@ -108,7 +109,7 @@ function maybeStashPreEndFrame(bambuUid, printerId, state) {
     if (pct == null || pct < PRE_END_PROGRESS_MIN || pct > PRE_END_PROGRESS_MAX) return;
 
     const wsManager = require("./wsManager");
-    const frame = wsManager.getLatestFrame(bambuUid, printerId);
+    const frame = wsManager.getLatestFrame(bambuUid, printerId, FRESH_FRAME_MS);
     if (!frame) return;
 
     const key = `${bambuUid}:${printerId}`;
@@ -147,10 +148,6 @@ async function captureTransition({ bambuUid, printerId, printerName, gcodeState,
 
     const event = classifyEvent(gcodeState, effectivePrev, state);
     if (!event) return;
-    // NOTE: don't clear the pre-end buffer here — the Tecnoprints WhatsApp
-    // broadcast reads it ~2s later. The buffer naturally gets overwritten when
-    // the next print on this printer reaches 95-99% progress, and is bounded
-    // by the LRU cap in maybeStashPreEndFrame.
 
     const client = getClient();
     if (!client) return;
@@ -174,7 +171,7 @@ async function captureTransition({ bambuUid, printerId, printerName, gcodeState,
       }
     }
     if (!frame) {
-      frame = wsManager.getLatestFrame(bambuUid, printerId);
+      frame = wsManager.getLatestFrame(bambuUid, printerId, FRESH_FRAME_MS);
     }
 
     if (!frame) {
@@ -231,10 +228,6 @@ async function captureTransition({ bambuUid, printerId, printerName, gcodeState,
         ContentType: "application/json",
       })),
     ]);
-
-    // NOTE: don't clear the pre-end buffer here — Tecnoprints reads it after a
-    // 2s sleep. Natural overwrite by the next print's 95-99% window handles
-    // staleness, and the LRU cap in maybeStashPreEndFrame bounds memory.
 
     log.info(`[TRAINING] Captured ${event.folder}/${event.event} for ${printerName || printerId} (${state?.mc_percent || 0}%, frame=${frameSource})`);
   } catch (err) {

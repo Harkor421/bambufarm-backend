@@ -33,17 +33,14 @@ class WsManager {
     // socket closes.
     this._lastStateJson = new Map();
 
+    // When each cached frame arrived (keyed by the Buffer, so evicted frames
+    // drop out on their own) — see getLatestFrame(maxAgeMs).
+    this._frameAt = new WeakMap();
+
     // Last-sent demand signature per user, so we don't resend identical sets.
     // Prevents log spam and camera disconnect/reconnect cycles when MQTT state
     // changes fire without actually changing the demanded printer set.
     this._lastDemandSig = new Map();
-
-    // Hysteresis: when a printer leaves the active state set, keep it demanded
-    // for a grace window so brief MQTT flickers (RUNNING→IDLE→RUNNING in a few
-    // seconds) don't cause camera disconnect/reconnect cycles.
-    // Map<`${uid}:${printerId}`, expiresAtMs>
-    this._demandGrace = new Map();
-    this._DEMAND_GRACE_MS = 90 * 1000;
 
     // Admin-camera demand: when the admin opens the cameras tab, we force ALL
     // connected bridges to stream ALL their cameras. The endpoint refreshes this
@@ -65,7 +62,7 @@ class WsManager {
     };
     eventBus.on(EVENTS.PRINTER_STATE_CHANGE, this._onPrinterStateChange);
 
-    // Sweep expired grace entries every 30s and re-send demand if anything dropped
+    // Re-evaluate camera demand every 30s (apps going idle, admin tab expiry)
     this._graceSweepInterval = setInterval(() => this._sweepDemandGrace(), 30000);
 
     /** @type {Map<string, Set<import('ws')>>} bambuUid → Set of bridge WS connections */
@@ -305,6 +302,7 @@ class WsManager {
     if (prevBuf) this._frameBytes -= prevBuf.length;
     userFrames.delete(printerId);
     userFrames.set(printerId, jpegPayload);
+    this._frameAt.set(jpegPayload, now);
     this._frameBytes += jpegPayload.length;
     // Evict oldest if over cap (20 printers max per user is generous)
     const MAX_FRAMES_PER_USER = 20;
@@ -399,10 +397,19 @@ class WsManager {
     }
   }
 
-  getLatestFrame(userId, printerId) {
+  /**
+   * Latest cached JPEG for a printer. With `maxAgeMs`, only a frame received
+   * within that window — cameras now stream only while someone watches, so
+   * the cached frame can be hours old and must not be passed off as "now"
+   * (training capture).
+   */
+  getLatestFrame(userId, printerId, maxAgeMs) {
     const userFrames = this.latestFrames.get(userId);
     if (!userFrames) return null;
-    return userFrames.get(printerId) || null;
+    const frame = userFrames.get(printerId) || null;
+    if (!frame || !maxAgeMs) return frame;
+    const at = this._frameAt.get(frame);
+    return at && Date.now() - at <= maxAgeMs ? frame : null;
   }
 
   /**
@@ -470,7 +477,12 @@ class WsManager {
       // JSON ping from RN clients (can't use native ping/pong)
       if (msg.type === "ping") {
         ws._isAlive = true;
-        ws._lastClientPingAt = Date.now();
+        const now = Date.now();
+        const wasIdle = ws._lastClientPingAt && now - ws._lastClientPingAt > config.ws.appIdleThresholdMs;
+        ws._lastClientPingAt = now;
+        // Back from the background: re-request its cameras right away rather
+        // than at the next 30s sweep.
+        if (wasIdle && userId) this._notifyBridgeDemand(userId);
         return;
       }
 
@@ -559,53 +571,40 @@ class WsManager {
   // ─── Demand tracking ───────────────────────────────────
 
   _getDemandedPrinters(userId) {
+    // Cameras stream ONLY while someone is actually looking: an app in the
+    // foreground subscribed to that printer, the admin cameras tab, or a
+    // public viewer. There is deliberately NO "always stream printing
+    // printers" rule anymore — that kept every bridge uploading video 24/7
+    // (~92 GB/day inbound, whose TCP overhead was most of the billed egress)
+    // while the server threw away nearly every frame.
     const demanded = new Set();
     const now = Date.now();
-    const adminViewing = now < this._adminCameraDemandUntil;
 
-    // Always stream cameras for printers that are currently printing
-    if (this._printerStateGetter) {
-      try {
-        const states = this._printerStateGetter(userId);
-        for (const [devId, state] of Object.entries(states)) {
-          const active =
-            state.gcode_state === "RUNNING" ||
-            state.gcode_state === "PAUSE" ||
-            state.gcode_state === "PREPARE";
-          if (active || adminViewing) demanded.add(devId);
-          if (active) {
-            this._demandGrace.set(`${userId}:${devId}`, now + this._DEMAND_GRACE_MS);
-          }
-        }
-      } catch {}
-    }
-
-    // Admin viewing: also include printers we know from the DB (covers users
-    // whose MQTT setup failed/is rate-limited, so MQTT doesn't have their printers).
-    if (adminViewing) {
+    if (now < this._adminCameraDemandUntil) {
+      if (this._printerStateGetter) {
+        try {
+          for (const devId of Object.keys(this._printerStateGetter(userId) || {})) demanded.add(devId);
+        } catch {}
+      }
+      // Also printers known from the DB (covers users whose MQTT setup failed).
       const dbPrinters = this._adminDemandPrinters.get(String(userId));
       if (dbPrinters) for (const id of dbPrinters) demanded.add(id);
     }
 
-    // Include printers still within their grace window (hysteresis)
-    for (const [key, expiresAt] of this._demandGrace) {
-      if (!key.startsWith(`${userId}:`)) continue;
-      if (expiresAt <= now) {
-        this._demandGrace.delete(key);
-        continue;
-      }
-      const devId = key.slice(userId.length + 1);
-      demanded.add(devId);
-    }
-
-    // App clients
+    // App clients — only those whose JS is alive (iOS suspends a backgrounded
+    // app's JS, so its 25s heartbeat ping stops). A suspended app keeps its
+    // socket for a while; without this check it would keep the camera on.
+    const idleThreshold = config.ws.appIdleThresholdMs;
     const clients = this.appClients.get(userId);
     if (clients) {
       for (const appWs of clients) {
+        const last = appWs._lastClientPingAt;
+        if (last && now - last > idleThreshold) continue;
         const meta = this.appMeta.get(appWs);
         if (meta) for (const id of meta.subscribedPrinters) demanded.add(id);
       }
     }
+
     // Public clients (count towards demand for public UID)
     const publicUid = process.env.PUBLIC_CAMERA_UID;
     if (publicUid && userId === publicUid) {
@@ -629,13 +628,6 @@ class WsManager {
   _sweepDemandGrace() {
     const now = Date.now();
     const affectedUsers = new Set();
-    for (const [key, expiresAt] of this._demandGrace) {
-      if (expiresAt <= now) {
-        this._demandGrace.delete(key);
-        const uid = key.split(":", 1)[0];
-        affectedUsers.add(uid);
-      }
-    }
 
     // Detect admin-demand expiry: if it WAS active and now isn't, notify all bridges
     // so they drop any idle printers we previously force-demanded.
@@ -646,6 +638,11 @@ class WsManager {
         for (const uid of this.bridges.keys()) affectedUsers.add(uid);
       }
     }
+
+    // Apps that went to the background stop pinging; re-evaluate every
+    // connected bridge so their cameras turn off within ~30s. Cheap: a
+    // handful of bridges, and _notifyBridgeDemand only sends on change.
+    if (this.bridges) for (const uid of this.bridges.keys()) affectedUsers.add(uid);
 
     for (const uid of affectedUsers) this._notifyBridgeDemand(uid);
   }

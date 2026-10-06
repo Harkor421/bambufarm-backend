@@ -6,7 +6,6 @@ describe("config", () => {
     expect(config.mqtt).toBeDefined();
     expect(config.apns).toBeDefined();
     expect(config.vision).toBeDefined();
-    expect(config.tecnoprints).toBeDefined();
     expect(config.ws).toBeDefined();
   });
 
@@ -47,9 +46,6 @@ describe("config", () => {
     expect(config.port).toBe(Number(process.env.PORT) || 3000);
   });
 
-  it("tecnoprints has dedup window", () => {
-    expect(config.tecnoprints.dedupWindow).toBe(30000);
-  });
 });
 
 describe("config.parseIsoDate (LEGACY_GRACE_UNTIL)", () => {
