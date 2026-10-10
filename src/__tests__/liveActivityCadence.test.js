@@ -22,7 +22,13 @@ jest.mock("../services/apnsTokenUtils", () => ({
   isTokenGone: (r) => !!r && r.status === 410,
 }));
 
+jest.mock("../services/laChannels", () => ({
+  openForPrint: jest.fn(async () => null),
+  broadcast: jest.fn(async () => null),
+}));
+
 const apns = require("../services/apnsSender");
+const laChannels = require("../services/laChannels");
 const tokenUtils = require("../services/apnsTokenUtils");
 const ledger = require("../services/laStartLedger");
 const { dispatchLiveActivity } = require("../services/liveActivityDispatcher");
@@ -144,7 +150,66 @@ describe("one card per print (dispatcher)", () => {
   it("updates a card that HAS a token, with a stale-date while printing", async () => {
     const withTok = { ...user, la_activity_tokens: { [DEV]: "act-tok" } };
     await dispatchLiveActivity([withTok], DEV, { data: { type: "print_resumed" } }, { ...state, gcode_state: "RUNNING" }, "RUNNING", "PAUSE", "P1S");
-    expect(apns.sendLiveActivityUpdate).toHaveBeenCalledWith("act-tok", expect.objectContaining({ status: "printing" }), 10, { staleAfterSec: 1800 });
+    expect(apns.sendLiveActivityUpdate).toHaveBeenCalledWith(
+      "act-tok",
+      expect.objectContaining({ status: "printing", updatedAt: expect.any(Number) }),
+      10,
+      { staleAfterSec: 60 * 60 + 900 } // 15 min past the 60-min ETA
+    );
     expect(apns.sendLiveActivityStart).not.toHaveBeenCalled();
   });
 });
+
+describe("broadcast channels (dispatcher)", () => {
+  const user = { _id: "u1", bambu_uid: "uid1", la_push_to_start_token: "start-tok", la_activity_tokens: {} };
+  const running = { gcode_state: "RUNNING", subtask_name: "bin.3mf", task_id: "900", mc_percent: 40, mc_remaining_time: 60 };
+
+  beforeEach(() => {
+    ledger._reset();
+    jest.clearAllMocks();
+  });
+
+  it("print_started opens a channel and passes it in the push-to-start", async () => {
+    laChannels.openForPrint.mockResolvedValueOnce("chan-1");
+    await dispatchLiveActivity([user], DEV, { data: { type: "print_started" } }, running, "RUNNING", "IDLE", "P1S");
+    expect(laChannels.openForPrint).toHaveBeenCalledWith("uid1", DEV, "900");
+    expect(apns.sendLiveActivityStart).toHaveBeenCalledWith(
+      "start-tok", expect.anything(), expect.anything(), undefined,
+      expect.objectContaining({ channelId: "chan-1" })
+    );
+  });
+
+  it("a finished print with NO token is ended through the channel (no more ghost card)", async () => {
+    laChannels.broadcast.mockResolvedValueOnce({ success: true, status: 200 });
+    const ok = await dispatchLiveActivity([user], DEV, { data: { type: "print_finished" } }, { ...running, gcode_state: "FINISH" }, "FINISH", "RUNNING", "P1S");
+    expect(ok).toBe(true);
+    expect(laChannels.broadcast).toHaveBeenCalledWith("uid1", DEV, "end", expect.objectContaining({ status: "finished", progress: 1 }), expect.objectContaining({ priority: 10 }));
+  });
+
+  it("a pause that reached the card via channel does not push-to-start another card", async () => {
+    laChannels.broadcast.mockResolvedValueOnce({ success: true, status: 200 });
+    await dispatchLiveActivity([user], DEV, { data: { type: "print_paused" } }, { ...running, gcode_state: "PAUSE" }, "PAUSE", "RUNNING", "P1S");
+    expect(apns.sendLiveActivityStart).not.toHaveBeenCalled();
+  });
+});
+
+describe("laContent", () => {
+  const { buildContentState, staleAfterSecFor } = require("../services/laContent");
+  it("back-dates startTime so the timer bar shows the real progress now", () => {
+    const st = buildContentState({ jobTitle: "x", progress: 0.4, remainingSec: 600, status: "printing", nowSec: 10000 });
+    expect(st.endTime).toBe(10600);
+    expect((10000 - st.startTime) / (st.endTime - st.startTime)).toBeCloseTo(0.4, 2);
+    expect(st.updatedAt).toBe(10000);
+  });
+  it("non-printing states keep start = now and never go stale", () => {
+    const st = buildContentState({ jobTitle: "x", progress: 0.4, remainingSec: 600, status: "paused", nowSec: 10000 });
+    expect(st.startTime).toBe(10000);
+    expect(staleAfterSecFor(st, 10000)).toBe(0);
+  });
+  it("printing goes stale 15 min after the ETA, never sooner than 10 min", () => {
+    expect(staleAfterSecFor({ status: "printing", endTime: 10000 + 3600 }, 10000)).toBe(4500);
+    expect(staleAfterSecFor({ status: "printing", endTime: 10000 }, 10000)).toBe(900);
+    expect(staleAfterSecFor({ status: "printing", endTime: 9000 }, 10000)).toBe(600);
+  });
+});
+

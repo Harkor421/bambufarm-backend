@@ -18,9 +18,8 @@ const { sendPush } = require("./pushSender");
 const apns = require("./apnsSender");
 const { getActivityToken, clearActivityToken, isTokenInvalid } = require("./apnsTokenUtils");
 const laUserCache = require("./laUserCache");
-// A printing card iOS marks stale if no newer push arrives in time (the
-// progress cadence pushes at least every ~10 min while printing).
-const LA_STALE_AFTER_SEC = 30 * 60;
+const laChannels = require("./laChannels");
+const { buildContentState, staleAfterSecFor } = require("./laContent");
 const { ensureFreshToken } = require("./tokenRefresh");
 const PrinterMqttConnection = require("./mqttPrinterConnection");
 const eventBus = require("./eventBus");
@@ -345,19 +344,20 @@ class MqttPrinterService {
               // Update LA via activity update token (push-to-start only works for "start" event).
               // Cached per account (60s) — this now runs every few minutes per printing printer.
               if (!apns.isConfigured()) return;
-              const allUsers = await laUserCache.getUsers(bambuUid);
-              const nowSec = Math.floor(Date.now() / 1000);
               const progress = (state.mc_percent || 0) / 100;
-              const remaining = (state.mc_remaining_time || 0) * 60;
               const pName = printerNames[devId] || devId;
-              const jTitle = state.subtask_name || "Print Job";
-
-              const contentState = {
-                jobTitle: jTitle, progress,
-                startTime: nowSec,
-                endTime: remaining > 0 ? nowSec + remaining : nowSec,
+              const contentState = buildContentState({
+                jobTitle: state.subtask_name,
+                progress,
+                remainingSec: (state.mc_remaining_time || 0) * 60,
                 status: "printing",
-              };
+              });
+              const staleAfterSec = staleAfterSecFor(contentState);
+
+              // iOS 18+ cards started with a channel get this without a token.
+              await laChannels.broadcast(bambuUid, devId, "update", contentState, { priority, staleAfterSec });
+
+              const allUsers = await laUserCache.getUsers(bambuUid);
 
               const sentTokens = new Set();
               for (const u of allUsers) {
@@ -365,7 +365,7 @@ class MqttPrinterService {
                 if (!actToken || sentTokens.has(actToken)) continue;
                 sentTokens.add(actToken);
                 try {
-                  const r = await apns.sendLiveActivityUpdate(actToken, contentState, priority, { staleAfterSec: LA_STALE_AFTER_SEC });
+                  const r = await apns.sendLiveActivityUpdate(actToken, contentState, priority, { staleAfterSec });
                   if (r?.success) {
                     log.debug(`[APNS] Progress ${pName}: ${Math.round(progress * 100)}% (p${priority})`);
                   } else {
@@ -471,16 +471,17 @@ class MqttPrinterService {
           // Send LA UPDATE to fix stale "preparing" state. Check ALL users for activity token.
           log.debug(`[MQTT] First connect ${devId}: already RUNNING, sending LA update to all users`);
           if (apns.isConfigured()) {
-            const nowSec = Math.floor(Date.now() / 1000);
-            const mcProgress = (state.mc_percent || 0) / 100;
-            const mcRemaining = (state.mc_remaining_time || 0) * 60;
-            const contentState = {
-              jobTitle: jobTitle,
-              progress: mcProgress,
-              startTime: nowSec,
-              endTime: mcRemaining > 0 ? nowSec + mcRemaining : nowSec,
+            const contentState = buildContentState({
+              jobTitle,
+              progress: (state.mc_percent || 0) / 100,
+              remainingSec: (state.mc_remaining_time || 0) * 60,
               status: "printing",
-            };
+            });
+            // A server restart mid-print: the channel (persisted) still reaches the card.
+            await laChannels.broadcast(user.bambu_uid || "none", devId, "update", contentState, {
+              priority: 10,
+              staleAfterSec: staleAfterSecFor(contentState),
+            });
             // Use activity update token from ANY user record with same bambu_uid
             const allUsers = await User.find({ bambu_uid: user.bambu_uid || "none", fail_count: { $lt: 5 } }).lean();
             for (const u of allUsers) {
@@ -489,7 +490,7 @@ class MqttPrinterService {
               // Priority 10 — first-connect recovery LA must surface immediately
               // (the memory of priority-5 updates getting throttled is why we force 10
               // for every LA update site).
-              const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10, { staleAfterSec: LA_STALE_AFTER_SEC });
+              const r = await apns.sendLiveActivityUpdate(actToken, contentState, 10, { staleAfterSec: staleAfterSecFor(contentState) });
               if (r?.success) {
                 log.debug(`[MQTT] LA update sent for ${devId}`);
                 break;

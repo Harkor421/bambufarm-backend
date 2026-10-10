@@ -10,6 +10,7 @@ const { connectDB, mongoose } = require("./db/database");
 const { startPolling, stopPolling } = require("./services/poller");
 const wsManager = require("./services/wsManager");
 const apns = require("./services/apnsSender");
+const laChannels = require("./services/laChannels");
 const mqttService = require("./services/mqttPrinterService");
 const printVisionService = require("./services/printVisionService");
 const log = require("./utils/logger");
@@ -35,6 +36,7 @@ async function main() {
 
   // Log APNs configuration status
   apns.logConfig();
+  laChannels.startSweeper();
 
   // Backfill any users still missing bambu_email — runs through the
   // throttled queue in adminMetrics so Bambu's API isn't hammered.

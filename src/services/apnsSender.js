@@ -198,7 +198,7 @@ async function sendAPNs(deviceToken, payload, priority = 10, expirationSec = 0) 
  * @param {object} contentState - { jobTitle, progress, startTime, endTime, status }
  * @param {object} [alert] - optional { title, body }
  */
-async function sendLiveActivityStart(pushToStartToken, attributes, contentState, alert, { staleAfterSec } = {}) {
+async function sendLiveActivityStart(pushToStartToken, attributes, contentState, alert, { staleAfterSec, channelId } = {}) {
   if (!isConfigured()) return null;
 
   const now = Math.floor(Date.now() / 1000);
@@ -217,6 +217,9 @@ async function sendLiveActivityStart(pushToStartToken, attributes, contentState,
     },
   };
   if (staleAfterSec > 0) payload.aps["stale-date"] = now + staleAfterSec;
+  // iOS 18+: the new card subscribes to this broadcast channel, so we can
+  // update and end it without its per-activity token. Older iOS ignores it.
+  if (channelId) payload.aps["input-push-channel"] = channelId;
 
   return sendAPNs(pushToStartToken, payload, 10, EXPIRATION_SEC.start);
 }
@@ -275,7 +278,102 @@ async function sendLiveActivityEnd(activityUpdateToken, finalContentState, dismi
   return sendAPNs(activityUpdateToken, payload, 10, EXPIRATION_SEC.end);
 }
 
+// ─── Broadcast channels (iOS 18+) ───────────────────────────────────────────
+// A Live Activity started with `input-push-channel` listens on that channel,
+// so the server can update/end it with ONE push and no per-activity token.
+// Requires the Broadcast capability on the App ID (Apple Developer → Push
+// Notifications); until then Apple answers 400 BroadcastFeatureNotEnabled
+// and services/laChannels falls back to tokens.
+
+const MANAGE_HOST = "https://api-manage-broadcast.push.apple.com:2196";
+let manageClient = null;
+
+function getManageClient() {
+  if (manageClient && !manageClient.closed && !manageClient.destroyed) return manageClient;
+  const c = http2.connect(MANAGE_HOST);
+  manageClient = c;
+  c.on("error", (err) => { log.warn(`[APNS] broadcast-manage HTTP/2 error: ${err.message}`); if (manageClient === c) manageClient = null; });
+  c.on("close", () => { if (manageClient === c) manageClient = null; });
+  return c;
+}
+
+/** One HTTP/2 request with JWT auth + timeout. Never throws. */
+function h2Request(client, headers, body) {
+  return new Promise((resolve) => {
+    const token = getJWT();
+    if (!token) return resolve({ success: false, status: 0, reason: "no-jwt" });
+    let req;
+    try {
+      req = client.request({ authorization: `bearer ${token}`, ...headers });
+    } catch (err) {
+      return resolve({ success: false, status: 0, reason: err.message });
+    }
+    let status = 0;
+    let resHeaders = {};
+    let data = "";
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error("APNs request timed out")));
+    req.on("response", (h) => { status = h[":status"]; resHeaders = h; });
+    req.on("data", (c) => { if (data.length < 4096) data += c; });
+    req.on("end", () => {
+      let reason = null;
+      if (data) { try { reason = JSON.parse(data).reason || data; } catch { reason = data; } }
+      resolve({ success: status >= 200 && status < 300, status, reason, headers: resHeaders });
+    });
+    req.on("error", (err) => resolve({ success: false, status: 0, reason: err.message }));
+    if (body) req.end(JSON.stringify(body)); else req.end();
+  });
+}
+
+/** Create a Live Activity channel that keeps the latest message for offline devices. */
+async function createChannel() {
+  if (!isConfigured()) return { success: false, status: 0, reason: "not-configured" };
+  const r = await h2Request(getManageClient(), {
+    ":method": "POST",
+    ":path": `/1/apps/${BUNDLE_ID}/channels`,
+    "content-type": "application/json",
+  }, { "message-storage-policy": 1, "push-type": "LiveActivity" });
+  return { ...r, channelId: r.headers?.["apns-channel-id"] || null };
+}
+
+async function deleteChannel(channelId) {
+  if (!isConfigured() || !channelId) return { success: false, status: 0 };
+  return h2Request(getManageClient(), {
+    ":method": "DELETE",
+    ":path": `/1/apps/${BUNDLE_ID}/channels`,
+    "apns-channel-id": channelId,
+  });
+}
+
+/** Send one Live Activity update/end to every device listening on a channel. */
+async function sendBroadcast(channelId, payload, priority = 10) {
+  if (!isConfigured() || !channelId) return null;
+  const event = payload?.aps?.event;
+  const exp = EXPIRATION_SEC[event] || EXPIRATION_SEC.update;
+  return h2Request(getClient(false), {
+    ":method": "POST",
+    ":path": `/4/broadcasts/apps/${BUNDLE_ID}`,
+    "apns-channel-id": channelId,
+    "apns-push-type": "liveactivity",
+    "apns-priority": String(priority === 5 ? 5 : 10),
+    "apns-expiration": String(Math.floor(Date.now() / 1000) + exp),
+    "content-type": "application/json",
+  }, payload);
+}
+
+/** The aps body for an update/end (shared by token and channel sends). */
+function liveActivityPayload(event, contentState, { staleAfterSec, dismissAfterSec } = {}) {
+  const now = Math.floor(Date.now() / 1000);
+  const aps = { timestamp: now, event, "content-state": contentState };
+  if (staleAfterSec > 0) aps["stale-date"] = now + staleAfterSec;
+  if (event === "end") aps["dismissal-date"] = now + (dismissAfterSec || 300);
+  return { aps };
+}
+
 module.exports = {
+  createChannel,
+  deleteChannel,
+  sendBroadcast,
+  liveActivityPayload,
   isConfigured,
   logConfig,
   sendLiveActivityStart,

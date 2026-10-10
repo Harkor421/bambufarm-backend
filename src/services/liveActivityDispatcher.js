@@ -7,11 +7,11 @@ const log = require("../utils/logger");
 const apns = require("./apnsSender");
 const { getActivityToken, clearActivityToken, clearStartToken, isTokenInvalid, isTokenGone } = require("./apnsTokenUtils");
 const ledger = require("./laStartLedger");
+const laChannels = require("./laChannels");
+const { buildContentState, staleAfterSecFor } = require("./laContent");
 
-// How long a printing card may go without a newer push before iOS marks it
-// stale. The progress cadence (mqttPrinterConnection) pushes at least every
-// ~10 min while printing, so 30 min only trips if the server stops talking.
-const STALE_AFTER_SEC = 30 * 60;
+// How long a finished/cancelled card stays on the lock screen.
+const DISMISS_AFTER_SEC = 15 * 60;
 // A second "print_started" for the same print within this window is the same
 // transition seen twice (reconnect/first-connect), not a new print.
 const DUPLICATE_START_WINDOW_SEC = 10 * 60;
@@ -23,10 +23,13 @@ const DUPLICATE_START_WINDOW_SEC = 10 * 60;
  * here — after the two-host retry it means a config problem, and deleting would
  * hide it (Alterna's rule).
  */
-async function startOnAll(startTokens, attributes, contentState, label) {
+async function startOnAll(startTokens, attributes, contentState, label, channelId = null) {
   let anySuccess = false;
   for (const [tok, user] of startTokens) {
-    const r = await apns.sendLiveActivityStart(tok, attributes, contentState, undefined, { staleAfterSec: STALE_AFTER_SEC });
+    const r = await apns.sendLiveActivityStart(tok, attributes, contentState, undefined, {
+      staleAfterSec: staleAfterSecFor(contentState),
+      channelId,
+    });
     if (r?.success) anySuccess = true;
     if (isTokenGone(r)) {
       try { await clearStartToken(user._id, tok); } catch (e) { log.debug(`[LA] clearStartToken failed: ${e.message}`); }
@@ -67,7 +70,6 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
   const jobTitle = state.subtask_name || "Print Job";
   const bambuUid = users[0]?.bambu_uid || "none";
   const printKey = ledger.printKeyOf(state);
-  const nowSec = Math.floor(Date.now() / 1000);
   const remaining = (state.mc_remaining_time || 0) * 60;
   const progress = normalizeProgress(gcodeState, effectivePrev, state.mc_percent);
   const type = notification.data.type;
@@ -90,18 +92,16 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
   try {
     if (type === "print_started") {
       // Fire push-to-start for every unique device's push-to-start token
-      const contentState = {
-        jobTitle, progress,
-        startTime: nowSec,
-        endTime: remaining > 0 ? nowSec + remaining : nowSec,
-        status: "printing",
-      };
+      const contentState = buildContentState({ jobTitle, progress, remainingSec: remaining, status: "printing" });
       const since = ledger.secondsSinceStart(bambuUid, devId);
       if (ledger.alreadyStarted(bambuUid, devId, printKey) && since != null && since < DUPLICATE_START_WINDOW_SEC) {
         log.debug(`[LA] print_started for ${devId}: card already started ${since}s ago — skipping duplicate`);
         return false;
       }
-      anySuccess = await startOnAll(startTokens, { printerId: devId, printerName }, contentState, "print_started");
+      // iOS 18+: the card subscribes to a per-print broadcast channel so we
+      // can update and end it without its (rarely delivered) update token.
+      const channelId = startTokens.size > 0 ? await laChannels.openForPrint(bambuUid, devId, printKey) : null;
+      anySuccess = await startOnAll(startTokens, { printerId: devId, printerName }, contentState, "print_started", channelId);
       if (anySuccess) ledger.recordStart(bambuUid, devId, printKey);
       return anySuccess;
     }
@@ -109,20 +109,25 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
     if (type === "print_finished" || type === "print_error") {
       const isCancelled = type === "print_error";
       ledger.clear(bambuUid, devId);
-      if (activityTokens.size === 0) {
-        // Print ended but we never had an activity token — LA either expired or
-        // never existed. Nothing to end. Quietly skip; this is normal.
-        log.debug(`[LA] No activity token for ${devId}, nothing to end (likely expired or never created)`);
-        return false;
-      }
-      const finalState = {
-        jobTitle: isCancelled ? "Cancelled" : jobTitle,
+      const finalState = buildContentState({
+        jobTitle,
         progress: isCancelled ? progress : 1.0,
-        startTime: nowSec, endTime: nowSec,
+        remainingSec: 0,
         status: isCancelled ? "cancelled" : "finished",
-      };
+      });
+      // End through the channel first: it reaches the cards that never gave
+      // us a token (the "ghost" cards).
+      const br = await laChannels.broadcast(bambuUid, devId, "end", finalState, { priority: 10, dismissAfterSec: DISMISS_AFTER_SEC });
+      if (br?.success) {
+        anySuccess = true;
+        log.info(`[LA] print_${isCancelled ? "cancelled" : "finished"} for ${devId}: ended via channel`);
+      }
+      if (activityTokens.size === 0) {
+        if (!anySuccess) log.debug(`[LA] No activity token or channel for ${devId}, nothing to end`);
+        return anySuccess;
+      }
       for (const [tok, { user }] of activityTokens) {
-        const r = await apns.sendLiveActivityEnd(tok, finalState);
+        const r = await apns.sendLiveActivityEnd(tok, finalState, DISMISS_AFTER_SEC);
         if (r?.success) anySuccess = true;
         // Always clear after END (whether success or invalid) — the LA is over either way
         await clearActivityToken(String(user._id), devId);
@@ -143,25 +148,24 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
         laTitle = "Paused by user";
       }
     }
-    const contentState = {
-      jobTitle: laTitle, progress,
-      startTime: nowSec,
-      endTime: remaining > 0 ? nowSec + remaining : nowSec,
-      status,
-    };
+    const contentState = buildContentState({ jobTitle: laTitle, progress, remainingSec: remaining, status });
+    const staleAfterSec = staleAfterSecFor(contentState);
+
+    // Channel first (reaches token-less cards on iOS 18+), then tokens (iOS 17,
+    // app-started cards). A device on both just sees the same state twice.
+    const br = await laChannels.broadcast(bambuUid, devId, "update", contentState, { priority: 10, staleAfterSec });
+    if (br?.success) anySuccess = true;
 
     if (activityTokens.size > 0) {
       for (const [tok, { user }] of activityTokens) {
-        const r = await apns.sendLiveActivityUpdate(
-          tok, contentState, 10,
-          status === "printing" ? { staleAfterSec: STALE_AFTER_SEC } : {}
-        );
+        const r = await apns.sendLiveActivityUpdate(tok, contentState, 10, { staleAfterSec });
         if (r?.success) anySuccess = true;
         if (isTokenInvalid(r)) await clearActivityToken(String(user._id), devId);
         log.info(`[LA] ${type} for ${devId}: ${progress * 100 | 0}% — ${r?.success ? "sent" : "failed"}`);
       }
       return anySuccess;
     }
+    if (anySuccess) return true; // the channel reached it — no need to start another card
 
     // FALLBACK: no activity token but the print is still active. Only when we
     // have NOT already started a card for this print — e.g. the print began
@@ -175,7 +179,8 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
         log.debug(`[LA] ${type} for ${devId}: card already started for this print, no update token yet — not stacking another`);
         return false;
       }
-      anySuccess = await startOnAll(startTokens, { printerId: devId, printerName }, contentState, `${type} fallback push-to-start`);
+      const channelId = await laChannels.openForPrint(bambuUid, devId, printKey);
+      anySuccess = await startOnAll(startTokens, { printerId: devId, printerName }, contentState, `${type} fallback push-to-start`, channelId);
       if (anySuccess) ledger.recordStart(bambuUid, devId, printKey);
       return anySuccess;
     }
