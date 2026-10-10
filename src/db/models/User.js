@@ -20,6 +20,9 @@ const userSchema = new Schema(
     fail_count: { type: Number, default: 0 },
     // ActivityKit push tokens for Live Activities
     la_push_to_start_token: { type: String, default: null },
+    // 2 = the installed build renders farm Live Activities and syncs their
+    // tokens natively (sent by LiveActivitySync with the push-to-start token).
+    la_version: { type: Number, default: null },
     la_activity_tokens: { type: Map, of: String, default: {} },
   },
   { timestamps: true }

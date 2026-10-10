@@ -205,7 +205,7 @@ router.post("/activity-token", async (req, res) => {
 // POST /api/push-to-start-token — store the ActivityKit push-to-start token
 router.post("/push-to-start-token", async (req, res) => {
   try {
-    const { expoPushToken, laPushToStartToken } = req.body;
+    const { expoPushToken, laPushToStartToken, laVersion } = req.body;
 
     if (!isValidExpoToken(expoPushToken)) {
       return res.status(400).json({ ok: false, error: "Invalid expoPushToken format" });
@@ -214,10 +214,10 @@ router.post("/push-to-start-token", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Invalid laPushToStartToken format" });
     }
 
-    await User.findOneAndUpdate(
-      { expo_push_token: expoPushToken },
-      { la_push_to_start_token: laPushToStartToken }
-    );
+    const update = { la_push_to_start_token: laPushToStartToken };
+    const v = Number(laVersion);
+    if (Number.isInteger(v) && v > 0 && v < 100) update.la_version = v;
+    await User.findOneAndUpdate({ expo_push_token: expoPushToken }, update);
     invalidateUserToken(expoPushToken);
 
     log.info(`[PUSH-TO-START] Stored token (${laPushToStartToken.slice(0, 16)}...)`);

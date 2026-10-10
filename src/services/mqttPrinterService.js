@@ -19,6 +19,7 @@ const apns = require("./apnsSender");
 const { getActivityToken, clearActivityToken, isTokenInvalid } = require("./apnsTokenUtils");
 const laUserCache = require("./laUserCache");
 const laChannels = require("./laChannels");
+const laFarm = require("./laFarm");
 const { buildContentState, staleAfterSecFor } = require("./laContent");
 const { ensureFreshToken } = require("./tokenRefresh");
 const PrinterMqttConnection = require("./mqttPrinterConnection");
@@ -290,7 +291,11 @@ class MqttPrinterService {
                 const { buildNotification } = require("./notificationBuilder");
                 const notif = buildNotification(state.gcode_state, prevGcodeState, state, devId, printerNames[devId] || devId);
                 if (notif) {
-                  await dispatchLiveActivity(allSameAccount, devId, notif, state, state.gcode_state, prevGcodeState, printerNames[devId] || devId);
+                  const farmCtx = { states: this.getAllPrinterStates(bambuUid), names: printerNames };
+                  await dispatchLiveActivity(allSameAccount, devId, notif, state, state.gcode_state, prevGcodeState, printerNames[devId] || devId, farmCtx);
+                  if (notif.data?.type !== "print_started") {
+                    await laFarm.refresh({ bambuUid, users: allSameAccount, ...farmCtx });
+                  }
                 }
               } catch (e) {
                 log.warn(`[LA] dispatch error: ${e.message}`);
@@ -358,6 +363,8 @@ class MqttPrinterService {
               await laChannels.broadcast(bambuUid, devId, "update", contentState, { priority, staleAfterSec });
 
               const allUsers = await laUserCache.getUsers(bambuUid);
+              // Farm cards (busy accounts): throttled per card inside laFarm.
+              await laFarm.tick({ bambuUid, users: allUsers, states: this.getAllPrinterStates(bambuUid), names: printerNames });
 
               const sentTokens = new Set();
               for (const u of allUsers) {

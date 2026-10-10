@@ -8,6 +8,7 @@ const apns = require("./apnsSender");
 const { getActivityToken, clearActivityToken, clearStartToken, isTokenInvalid, isTokenGone } = require("./apnsTokenUtils");
 const ledger = require("./laStartLedger");
 const laChannels = require("./laChannels");
+const laFarm = require("./laFarm");
 const { buildContentState, staleAfterSecFor } = require("./laContent");
 
 // How long a finished/cancelled card stays on the lock screen.
@@ -63,7 +64,7 @@ const { normalizeProgress } = require("./notificationBuilder");
  * @param {string} printerName - Printer display name
  * @returns {boolean} true if at least one APNs delivery succeeded
  */
-async function dispatchLiveActivity(users, devId, notification, state, gcodeState, effectivePrev, printerName) {
+async function dispatchLiveActivity(users, devId, notification, state, gcodeState, effectivePrev, printerName, farmCtx = null) {
   if (!apns.isConfigured()) return false;
   if (!Array.isArray(users) || users.length === 0) return false;
 
@@ -91,6 +92,11 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
 
   try {
     if (type === "print_started") {
+      // Busy farms get farm cards (several printers per card) instead of one
+      // card per printer — see laFarm.
+      if (farmCtx && (await laFarm.handleStart({ bambuUid, users, states: farmCtx.states, names: farmCtx.names }))) {
+        return true;
+      }
       // Fire push-to-start for every unique device's push-to-start token
       const contentState = buildContentState({ jobTitle, progress, remainingSec: remaining, status: "printing" });
       const since = ledger.secondsSinceStart(bambuUid, devId);
@@ -175,6 +181,7 @@ async function dispatchLiveActivity(users, devId, notification, state, gcodeStat
     // ~650 stacked cards per 6h in prod). That card refreshes as soon as the
     // app runs and registers its update token.
     if (startTokens.size > 0) {
+      if (farmCtx && (await laFarm.isLive(bambuUid))) return anySuccess; // the farm card covers it
       if (ledger.alreadyStarted(bambuUid, devId, printKey)) {
         log.debug(`[LA] ${type} for ${devId}: card already started for this print, no update token yet — not stacking another`);
         return false;

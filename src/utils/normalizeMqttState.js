@@ -45,6 +45,10 @@ function extractAms(state) {
       trayNow: state?.ams?.tray_now ?? null,
       trayPre: state?.ams?.tray_pre ?? null,
       trayTar: state?.ams?.tray_tar ?? null,
+      // Hex bitmask of slots that physically hold filament (bit = unit*4 + slot).
+      // A loaded non-RFID spool can report no tray_type, so this is how the app
+      // tells "loaded, type unknown" apart from a truly empty slot.
+      trayExistBits: state?.ams?.tray_exist_bits ?? null,
     };
   } catch {
     return null;
